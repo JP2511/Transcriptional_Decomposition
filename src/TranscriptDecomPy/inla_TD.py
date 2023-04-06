@@ -48,4 +48,28 @@ def central_differences(objective: Callable, x: float, h: float) -> float:
     return (objective(x + h) - objective(x - h)) / (2*h)
 
 
+###############################################################################
+# Newton-Raphson method
+
+def approx_taylor_expansion(objective: Callable, x: np.ndarray, 
+                                h: np.ndarray) -> tuple:
+    """Approximates the second and third terms of a quadratic Taylor expansion.
+
+    Args:
+        objective (Callable): function we are expanding.
+        x (np.ndarray): value around which we are performing the Taylor 
+            expansion.
+        h (np.ndarray): step of the approximation. Ideally, it should be as 
+            close to zero as possible.
+
+    Returns:
+        b: approximate second term of the quadratic Taylor expansion.
+        c: approximate third term of the quadratic Taylor expansion.
+    """
+    
+    c = - ((objective(x + h) - 2*objective(x) + objective(x - h)) / (h**2))
+    b = central_differences(objective, x, h) - x * c
+    return (b, c)
+
+
 # def newton_raphson_method()
