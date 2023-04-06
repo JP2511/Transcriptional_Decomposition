@@ -1,6 +1,7 @@
 import numpy as np
 
 from scipy.stats import nbinom
+from typing import Callable
 
 
 ###############################################################################
@@ -27,3 +28,24 @@ def log_likelihood_neg_binom(obs: int, x: int, theta: float) -> float:
     """
 
     return np.sum(nbinom.logpmf(obs, x, theta), 1)
+
+
+def central_differences(objective: Callable, x: float, h: float) -> float:
+    """Approximates the derivative of a function using finite differences, in
+    particular using the central differences.
+
+    Args:
+        objective (Callable): function whose derivative we want to approximate.
+        x (float): value around which we want the approximation to the 
+            derivative.
+        h (float): step of the approximation. Ideally, it should be as close to
+            zero as possible.
+
+    Returns:
+        float: approximate derivative value at the x point.
+    """
+
+    return (objective(x - h) - objective(x + h)) / (2*h)
+
+
+# def newton_raphson_method()
