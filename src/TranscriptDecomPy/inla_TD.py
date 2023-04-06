@@ -45,7 +45,7 @@ def central_differences(objective: Callable, x: float, h: float) -> float:
         float: approximate derivative value at the x point.
     """
 
-    return (objective(x - h) - objective(x + h)) / (2*h)
+    return (objective(x + h) - objective(x - h)) / (2*h)
 
 
 # def newton_raphson_method()
