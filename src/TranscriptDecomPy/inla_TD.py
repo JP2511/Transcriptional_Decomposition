@@ -1,6 +1,8 @@
 import numpy as np
 
+from scipy import linalg, sparse
 from scipy.stats import nbinom
+
 from typing import Callable
 
 
@@ -72,4 +74,60 @@ def approx_taylor_expansion(objective: Callable, x: np.ndarray,
     return (b, c)
 
 
-# def newton_raphson_method()
+def newton_raphson_method(objective: Callable, Q: sparse.dia_matrix, 
+                            mu: np.ndarray, h: float, threshold: float, 
+                            max_iter: int, init_v: np.ndarray) -> tuple:
+    """Calculates the Gaussian approximation to the full conditional of the 
+    GMRF, p(x|y,theta), using a second-order Taylor expansion.
+
+        The Gaussian approximation is made by specifically matching the modal 
+    configuration and the curvature at the mode.
+        The calculations make use of sparse diagonal matrix linear algebra. 
+    We use this because we make the assumption that the precision matrix of the
+    GMRF is not only sparse but diagonal as well. Since we are only looking at
+    implementing the model for a combination of a first-order Random-Walk and
+    a mixed-effects iid model, the assumption should be valid.
+
+    Args:
+        objective (Callable): log-likelihood function to use in the 
+            approximation.
+        Q (sparse.dia_matrix): precision matrix of the GMRF.
+        mu (np.ndarray): mean of the GMRF.
+        h (float): step used in the finite differences approximations of the
+            derivatives.
+        threshold (float): maximum Euclidean-distance required to consider that
+            the Newton-Raphson method has converged.
+        max_iter (int): maximum number of iterations before stopping the 
+            Newton-Raphson method and announcing that the method has not 
+            converged.
+        init_v (np.ndarray): initial point around which to perform the Taylor
+            expansion on the log-likelihood function.
+
+    Raises:
+        Exception: The iteration surpasses the maximum number iterations 
+            specified in the arguments.
+
+    Returns:
+        new_x (np.ndarray): mean of the Gaussian approximation to the full 
+            conditional of the GMRF.
+        matrix_A (np.ndarray): precision matrix of the Gaussian approximation
+            to the full conditional of the GMRF.
+    """
+    
+    current_x = init_v
+    for _ in range(max_iter):
+        b, c = approx_taylor_expansion(objective, current_x, h)
+
+        ## Calculates the mean solving an equation of the type: 
+        ##    matrix_A @ x = result_b
+        matrix_A = Q + sparse.diags(c)
+        result_b = Q @ mu + b
+        new_x = linalg.solve_banded(matrix_A, result_b)
+
+        if linalg.norm(current_x - new_x) < threshold:
+            return (new_x, matrix_A)
+        
+        current_x = new_x
+    
+    raise Exception("Max iteration achieved and Newton_Raphson method " + 
+                    "did not converge")
