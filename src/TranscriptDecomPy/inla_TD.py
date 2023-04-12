@@ -9,12 +9,12 @@ from typing import Callable
 ###############################################################################
 
 
-def log_likelihood_neg_binom(obs: int, x: int, theta: float) -> float:
+def log_likelihood_neg_binom(x: int, obs: int, theta: float) -> float:
     """Calculates the log likelihood of the negative binomial distribution.
 
     Args:
-        obs (int): observation of which to calculate the likelihood.
         x (int): mean of the negative binomial distribution.
+        obs (int): observation of which to calculate the likelihood.
         theta (float): success probability in experiment in the negative 
             binomial distribution.
 
@@ -32,22 +32,96 @@ def log_likelihood_neg_binom(obs: int, x: int, theta: float) -> float:
     return np.sum(nbinom.logpmf(obs, n, theta), 1)
 
 
-def central_differences(objective: Callable, x: float, h: float) -> float:
-    """Approximates the derivative of a function using finite differences, in
-    particular using the central differences.
+###############################################################################
+
+def expand_increment_axis(n_feat: int, h: float) -> np.ndarray:
+    """Creates an expanded matrix that contains all the vectors necessary to
+    individually increment each feature while not changing the other features.
+
+    Args:
+        n_feat (int): number of features that need to be incremented.
+        h (float): increment value.
+
+    Returns:
+        np.ndarray: multi-dimensional array that contains the individual 
+            increments at each feature without altering the other features.
+
+    Ensures:
+        The function returns a multi-dimensional array of the shape 
+            (n_feat, 1, n_feat). In the context of the problem, the first axis
+            corresponds to the increment at a particular feature; the second
+            axis corresponds to the observations and the third axis corresponds
+            to the actual value of the features after the addition of the 
+            increment.
+    """
+
+    return h * np.eye(n_feat)[:, np.newaxis, :]
+
+
+def fst_order_central_differences(objective: Callable, x: np.ndarray,
+                                    increment: np.ndarray, 
+                                    h: float) -> np.ndarray:
+    """Approximates the first derivative of a function using finite differences,
+    in particular using first order central differences.
 
     Args:
         objective (Callable): function whose derivative we want to approximate.
-        x (float): value around which we want the approximation to the 
+        x (np.ndarray): value around which we want the approximation to the 
             derivative.
+        increment (np.ndarray): 3-dimensional array containing the vectors that
+            increment each feature of x individually based on h.
         h (float): step of the approximation. Ideally, it should be as close to
             zero as possible.
 
     Returns:
-        float: approximate derivative value at the x point.
-    """
+        np.ndarray: approximate derivative value at the x point. The shape of 
+            the returned array depends on the objective function.
 
-    return (objective(x + h) - objective(x - h)) / (2*h)
+    Requires:
+        increment should be a 3-dimensional array, where the first dimension
+            corresponds to each of the increments to the individuals features;
+            the second dimension should correspond to the observations, so it
+            should have shape one in this array; and the third dimension 
+            corresponds to the features of x.
+        the step actually used in the increment array should be h.
+    """
+    
+    return (objective(x + increment) - objective(x - increment)) / (2*h)
+
+
+def snd_order_central_differences(objective: Callable, x: np.ndarray,
+                                    increment: np.ndarray, 
+                                    h: float) -> float:
+    """Approximates the second derivative of a function using finite 
+    differences, in particular using second order central differences. This 
+    function considers only derivatives where the objective function is twice
+    partially derived by the same variable.
+
+    Args:
+        objective (Callable): function whose derivative we want to approximate.
+        x (np.ndarray): value around which we want the approximation to the 
+            derivative.
+        increment (np.ndarray): 3-dimensional array containing the vectors that
+            increment each feature of x individually based on h.
+        h (float): step of the approximation. Ideally, it should be as close to
+            zero as possible.
+
+    Returns:
+        np.ndarray: approximate derivative value at the x point. The shape of 
+            the returned array depends on the objective function.
+
+    Requires:
+        increment should be a 3-dimensional array, where the first dimension
+            corresponds to each of the increments to the individuals features;
+            the second dimension should correspond to the observations, so it
+            should have shape one in this array; and the third dimension 
+            corresponds to the features of x.
+        the step actually used in the increment array should be h.
+    """
+    
+    diffs = objective(x + increment) - 2*objective(x) + objective(x - increment)
+    return diffs / (h**2)
+
 
 
 ###############################################################################
@@ -68,9 +142,11 @@ def approx_taylor_expansion(objective: Callable, x: np.ndarray,
         b: approximate second term of the quadratic Taylor expansion.
         c: approximate third term of the quadratic Taylor expansion.
     """
-    
-    c = - ((objective(x + h) - 2*objective(x) + objective(x - h)) / (h**2))
-    b = central_differences(objective, x, h) - x * c
+    increment = expand_increment_axis(x.shape[0], h)
+    c = - snd_order_central_differences(objective, x, increment, h)
+
+    b = fst_order_central_differences(objective, x, increment, h)
+    b += x * c # verify
     return (b, c)
 
 
@@ -125,6 +201,8 @@ def newton_raphson_method(objective: Callable, Q: sparse.dia_matrix,
         new_x = linalg.solve_banded(matrix_A, result_b)
 
         if linalg.norm(current_x - new_x) < threshold:
+            # log_det = cholesky(matrix_A).logdet()
+            # return np.exp(log_det)
             return (new_x, matrix_A)
         
         current_x = new_x
