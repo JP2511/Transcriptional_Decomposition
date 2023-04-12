@@ -9,27 +9,39 @@ from typing import Callable
 ###############################################################################
 
 
-def log_likelihood_neg_binom(x: int, obs: int, theta: float) -> float:
-    """Calculates the log likelihood of the negative binomial distribution.
+def log_likelihood_neg_binom(x: np.ndarray, obs: np.ndarray, 
+                                theta: float) -> np.ndarray:
+    """Calculates the log likelihood of the negative binomial distribution. It 
+    is assumed that a point in this distribution is multivariate. As such, the
+    log-likelihood of a such a point corresponds to the sum of the 
+    log-likelihood its features. In case, there are multiple observations, the
+    log-likelihood is calculated for all the observations, meaning that the
+    value obtained corresponds to the sum of the log-likelihood of each point. 
 
     Args:
-        x (int): mean of the negative binomial distribution.
-        obs (int): observation of which to calculate the likelihood.
+        x (np.ndarray): mean of the negative binomial distribution.
+        obs (np.ndarray): observations of which to calculate the probability 
+            mass (pm).
         theta (float): success probability in experiment in the negative 
             binomial distribution.
 
     Returns:
-        float: log likelihood of the point given the specified negative binomial 
-            distribution.
+        np.ndarray: log likelihood of the point given the specified negative 
+            binomial distribution.
 
     Requires:
-        obs > 0
-        x > 0
+        obs_i > 0
+        x_i > 0
         0 <= theta <= 1
     """
 
     n = x * (theta/(1-theta))
-    return np.sum(nbinom.logpmf(obs, n, theta), 1)
+    pm_for_single_obs = np.sum(nbinom.logpmf(obs, n, theta), -1)
+    
+    if len(pm_for_single_obs.shape) > 1:
+        return np.sum(pm_for_single_obs, -1)
+    
+    return pm_for_single_obs
 
 
 ###############################################################################
@@ -142,6 +154,7 @@ def approx_taylor_expansion(objective: Callable, x: np.ndarray,
         b: approximate second term of the quadratic Taylor expansion.
         c: approximate third term of the quadratic Taylor expansion.
     """
+
     increment = expand_increment_axis(x.shape[0], h)
     c = - snd_order_central_differences(objective, x, increment, h)
 
