@@ -10,7 +10,7 @@ import functools
 
 import numpy as np
 
-from scipy.stats import halfnorm, nbinom, multivariate_normal
+from scipy.stats import nbinom, multivariate_normal
 
 
 # ###############################################################################
@@ -21,19 +21,50 @@ class TestLikelihood(unittest.TestCase):
     #  tests for the function Negative Binomial Likelihood  #
     # ----------------------------------------------------- #
 
-    def test_likelihood_with_different_dist(self):
-        
-        list_of_tests = [halfnorm.rvs(10, 4, 100) for i in range(31)]
-        list_of_tests.append(np.full(100, 21))
-        for _ in range(40):
-            list_of_tests.append(halfnorm.rvs(10, 4, 100))
-        list_of_tests = np.array(list_of_tests)
-        print(list_of_tests.shape)
 
-        results = tdp.log_likelihood_neg_binom(list_of_tests, 
-                                                np.full(100, 10), [0.3])
+    def test_likelihood_shape_return_2_dim(self):
+        """Test to check if the likelihood returns an array of the appropriate
+        dimensions if the combination of the observations and the means 
+        produces a 2D array.
+        """
+
+        dataset = np.array([nbinom.rvs(5, 0.7, size=100) for i in range(30)])
+        result = tdp.log_likelihood_neg_binom(dataset, np.full(100, 5), 0.7)
+
+        self.assertEqual(result.shape, (30,))
+
+
+    def test_likelihood_shape_return_3_dim(self):
+        """Test to check if the likelihood returns an array of the appropriate
+        dimensions if the combination of the observations and the means 
+        produces a 3D array.
+        """
+
+        dataset = [[nbinom.rvs(5, 0.7, size=100) for _ in range(30)],
+                   [nbinom.rvs(6, 0.3, size=100) for _ in range(30)]]
+        dataset = np.array(dataset)
+        result = tdp.log_likelihood_neg_binom(dataset, 
+                                                np.full(100, 5, dtype=float), 
+                                                0.7)
+
+        self.assertEqual(result.shape, (2,))
+
+
+    def test_likelihood_with_different_dist(self):
+        """Tests if the log-likelihood function can successfully give higher 
+        probability to the means that actually generated data. Since this is
+        based on sampling, it might give the wrong result sum of the times.
+        """
+
+        theta = 0.3
+        obs = np.array([nbinom.rvs(i * theta / (1-theta) , theta, 200) 
+                for i in range(1,31)]).T
+        xs = np.repeat(np.arange(1, 15)[:, np.newaxis], 30, 1)[:, np.newaxis, :]
+        xs = np.concatenate((xs, np.arange(1,31)[np.newaxis, np.newaxis]), 0)
+        
+        results = tdp.log_likelihood_neg_binom(obs, xs, theta)
         max_value_idx = np.argmax(results)
-        self.assertEqual(max_value_idx, 31)
+        self.assertEqual(max_value_idx, 14)
 
 
 
