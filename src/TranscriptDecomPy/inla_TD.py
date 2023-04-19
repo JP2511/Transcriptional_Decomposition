@@ -223,3 +223,96 @@ def newton_raphson_method(objective: Callable, Q: sparse.dia_matrix,
     
     raise Exception("Max iteration achieved and Newton_Raphson method " + 
                     "did not converge")
+
+
+
+# ###############################################################################
+# # p(theta | y)
+
+def general_determinant(A: sparse.dia_matrix, zero: float=1e-5) -> float:
+    """Calculates a general determinant that applies to singular matrices, i.e.,
+    matrices that are not of full-rank. The determinant here corresponds to the
+    product of all the nonzero eigenvalues of the matrix.
+
+        Here, we make use of the assumptions of A being a diagonal matrix, so
+    that we can use a banded solver as these are much faster than general sparse
+    solvers.
+
+    Args:
+        A (sparse.dia_matrix): real symmetric matrix.
+        zero (float): let e be an eigenvalue, if 0 <= e < zero, then e is
+            considered to be zero, otherwise e has its own value.
+
+
+    Returns:
+        float: general determinant of A.
+    
+    Requires:
+        A should only have nonzero values in the main diagonal and the first
+            offset diagonals of the matrix.
+        A.data should be ordered such that the main diagonal is the middle 
+            element of the array, and that the the top offset diagonal should be
+            the first element of the array.
+        zero >= 0
+        zero should be a very small number.
+    """
+
+    eigvs = linalg.eigvals_banded(A.data[:2])
+    return np.prod(eigvs[eigvs > zero])
+
+
+def approx_marg_post_of_theta(data_likelihood: Callable,
+                                theta: float,
+                                alpha: np.ndarray,
+                                Q: sparse.dia_matrix,
+                                Q_det: float,
+                                theta_dist: Callable,
+                                gaus_approx_mean: np.ndarray,
+                                gaus_approx_Q: sparse.dia_matrix) -> float:
+    """Approximates the marginal posterior of theta, p(theta|y).
+
+        Since we assume that the precision matrix Q of the GRMF or the matrix 
+    Q + diag(c) are singular (not of full-rank), we calculate the general 
+    determinant instead of the common determinant. These calculations assume
+    that these matrices are diagonal (main diagonal and the first offset 
+    diagonals) to use in a banded_solver making calculations quite fast.
+
+    Args:
+        data_likelihood (Callable): function that calculates the likelihood of
+            the data, given the provided means
+        theta (float): second parameter of the likelihood of the data
+        alpha (np.ndarray): means of the GMRF
+        Q (sparse.dia_matrix): precision matrix of the GMRF
+        Q_det (float): determinant of the precision matrix of the GRMF
+        theta_dist (Callable): probability density function of the distribution
+            of theta
+        gaus_approx_mean (np.ndarray): mean of the Gaussian approximation to the
+            full conditional of the GMRF.
+        gaus_approx_Q (sparse.dia_matrix): precision matrix of the Gaussian 
+            approximation to the full conditional of the GMRF.
+
+    Returns:
+        float: approximation of the (natural) log probability of the marginal
+            posterior of theta. 
+    """
+    
+    dim = alpha.shape[0]
+    x = gaus_approx_mean
+
+    # ln p(y|x, theta)
+    likelihood = data_likelihood(x)
+
+    # ln p(x|theta)
+    exponent = -(1/2) * (x - alpha) @ Q @ (x - alpha)[:, np.newaxis]
+    gmrf_prior = np.sqrt(Q_det * ((2*np.pi)**(-dim))) * (np.exp(exponent))[0]
+    gmrf_prior = np.log(gmrf_prior)
+    
+    # ln p(theta)
+    theta_prior = np.log(theta_dist(theta))
+
+    # ln p_G(x|y, theta)
+    ga_det = general_determinant(gaus_approx_Q)
+    ga_full_conditional_x = np.log(np.sqrt(ga_det * ((2*np.pi)**(-dim))))
+
+    # ln p(theta | y)
+    return likelihood + gmrf_prior + theta_prior - ga_full_conditional_x
