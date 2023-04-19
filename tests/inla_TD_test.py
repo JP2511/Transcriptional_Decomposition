@@ -10,6 +10,7 @@ import functools
 
 import numpy as np
 
+from scipy import sparse, linalg
 from scipy.stats import nbinom, multivariate_normal
 
 
@@ -31,7 +32,7 @@ class TestLikelihood(unittest.TestCase):
         dataset = np.array([nbinom.rvs(5, 0.7, size=100) for i in range(30)])
         result = tdp.log_likelihood_neg_binom(dataset, np.full(100, 5), 0.7)
 
-        self.assertEqual(result.shape, (30,))
+        self.assertEqual(result.shape, ())
 
 
     def test_likelihood_shape_return_3_dim(self):
@@ -207,6 +208,91 @@ class TestDerivativesApprox(unittest.TestCase):
         expected_result = np.full((n_feat, 1), 2)
 
         return np.testing.assert_array_almost_equal(result, expected_result)
+
+
+
+###############################################################################
+
+def create_prec_and_cov(n_feat: int, diag_val: float, offset: float) -> tuple:
+    """Creates a precision matrix (and its inverse) with only nonzero elements
+    in the main diagonal and the first offset diagonal on each side of the 
+    matrix.
+
+    Args:
+        n_feat (int): number of rows or columns of the precision matrix.
+        diag_val (float): value in the main diagonal.
+        offset (float): value on each of the first offset diagonals.
+
+    Returns:
+        Q: precision matrix.
+        cov: covariance matrix (inverse of the precision matrix). 
+    """
+
+    Q = sparse.diags(np.full(n_feat, diag_val))
+    Q.setdiag(offset, k=-1)
+    Q.setdiag(offset, k=1)
+    
+    dense_Q = Q.todense()
+    cov = linalg.inv(dense_Q)
+    Q = sparse.dia_matrix(dense_Q)
+
+    return (Q, cov)
+
+
+def create_synthetic_data(theta: float, alpha: np.ndarray, cov: np.ndarray,
+                            n_reps: int) -> np.tuple:
+    """Creates a synthetic dataset where a specified multivariate normal 
+    distribution generates a latent vector, which is then used in a negative
+    binomial distribution to generate the observations.
+
+    Args:
+        theta (float): probability of success in the negative binomial 
+            distribution.
+        alpha (np.ndarray): vector of means of the multivariate normal 
+            distribution.
+        cov (np.ndarray): covariance matrix of the multivariate normal 
+            distribution.
+        n_reps (int): number of observations to be sampled from the negative
+            binomial distribution.
+
+    Returns:
+        gmrf (np.ndarray): latent vector sampled by the multivariate normal
+            distribution that is used to sample the observations.
+        obs (np.ndarray): sampled observations.
+    """
+
+    gmrf = multivariate_normal(alpha, cov).rvs()
+    param_n_NB = gmrf * theta / (1 - theta)
+    obs = nbinom(param_n_NB, theta).rvs(size=(n_reps, alpha.shape[0]))
+    return (gmrf, obs)
+
+
+class TestConditionalDensities(unittest.TestCase):
+
+    # ---------------------------------------------- #
+    #  tests for the function newton_raphson_method  #
+    # ---------------------------------------------- #
+
+
+    def test_newton_raphson_method(self):
+        """Tests the Newton-Raphson method by testing if it correctly 
+        approximates the latent vector that both was generated and is used to
+        generate the observations."""
+        n_feat = 10
+        theta = 0.35
+        alpha = np.full(n_feat, 3)
+        
+        Q, cov = create_prec_and_cov(n_feat, 2, -1)
+        
+        gmrf, obs = create_synthetic_data(theta, alpha, cov, 200)
+        objective = functools.partial(tdp.log_likelihood_neg_binom, theta=theta, 
+                                        obs=obs)
+
+        mode_x, _, = tdp.newton_raphson_method(objective=objective, 
+                                                Q=Q, mu=alpha, h=1e-4, 
+                                                threshold=1e-6, max_iter=100, 
+                                                init_v=np.ones(n_feat))
+        return np.testing.assert_array_almost_equal(mode_x, gmrf, 0)
 
 
 
