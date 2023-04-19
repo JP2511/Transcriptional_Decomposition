@@ -38,7 +38,7 @@ def log_likelihood_neg_binom(x: np.ndarray, obs: np.ndarray,
     n = x * (theta/(1-theta))
     pm_for_single_obs = np.sum(nbinom.logpmf(obs, n, theta), -1)
     
-    if len(pm_for_single_obs.shape) > 1:
+    if len(pm_for_single_obs.shape) > 0:
         return np.sum(pm_for_single_obs, -1)
     
     return pm_for_single_obs
@@ -175,7 +175,9 @@ def newton_raphson_method(objective: Callable, Q: sparse.dia_matrix,
     We use this because we make the assumption that the precision matrix of the
     GMRF is not only sparse but diagonal as well. Since we are only looking at
     implementing the model for a combination of a first-order Random-Walk and
-    a mixed-effects iid model, the assumption should be valid.
+    a mixed-effects iid model, the assumption should be valid. It should also be
+    true that precision matrix should only have the main diagonal and the first
+    offset diagonals with nonzero elements.
 
     Args:
         objective (Callable): log-likelihood function to use in the 
@@ -209,13 +211,12 @@ def newton_raphson_method(objective: Callable, Q: sparse.dia_matrix,
 
         ## Calculates the mean solving an equation of the type: 
         ##    matrix_A @ x = result_b
-        matrix_A = Q + sparse.diags(c)
+        matrix_A = Q + sparse.diags(c, format='dia')
         result_b = Q @ mu + b
-        new_x = linalg.solve_banded(matrix_A, result_b)
+
+        new_x = linalg.solve_banded((1,1), matrix_A.data, result_b)
 
         if linalg.norm(current_x - new_x) < threshold:
-            # log_det = cholesky(matrix_A).logdet()
-            # return np.exp(log_det)
             return (new_x, matrix_A)
         
         current_x = new_x
