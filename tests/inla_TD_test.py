@@ -53,8 +53,10 @@ class TestLikelihood(unittest.TestCase):
 
     def test_likelihood_with_different_dist(self):
         """Tests if the log-likelihood function can successfully give higher 
-        probability to the means that actually generated data. Since this is
-        based on sampling, it might give the wrong result sum of the times.
+        probability to the means that actually generated data.
+            Since this is based on sampling, it might give the wrong result 
+        sometimes. However, increasing the number of samples should reduce the
+        odds of this happening."
         """
 
         theta = 0.3
@@ -240,7 +242,7 @@ def create_prec_and_cov(n_feat: int, diag_val: float, offset: float) -> tuple:
 
 
 def create_synthetic_data(theta: float, alpha: np.ndarray, cov: np.ndarray,
-                            n_reps: int) -> np.tuple:
+                            n_reps: int) -> tuple:
     """Creates a synthetic dataset where a specified multivariate normal 
     distribution generates a latent vector, which is then used in a negative
     binomial distribution to generate the observations.
@@ -269,6 +271,23 @@ def create_synthetic_data(theta: float, alpha: np.ndarray, cov: np.ndarray,
 
 class TestConditionalDensities(unittest.TestCase):
 
+    ####################################################
+    # Defining some class variables for data synthesis #
+    ####################################################
+
+    n_feat = 10
+    theta = 0.35
+    alpha = np.full(n_feat, 3)
+    
+    Q, cov = create_prec_and_cov(n_feat, 2, -1)
+    
+    gmrf, obs = create_synthetic_data(theta, alpha, cov, 400)
+    
+    #######################################
+    #  end of class variable definitions  #
+    #######################################
+
+
     # ---------------------------------------------- #
     #  tests for the function newton_raphson_method  #
     # ---------------------------------------------- #
@@ -278,22 +297,59 @@ class TestConditionalDensities(unittest.TestCase):
         """Tests the Newton-Raphson method by testing if it correctly 
         approximates the latent vector that both was generated and is used to
         generate the observations."""
-        n_feat = 10
-        theta = 0.35
-        alpha = np.full(n_feat, 3)
         
-        Q, cov = create_prec_and_cov(n_feat, 2, -1)
-        
-        gmrf, obs = create_synthetic_data(theta, alpha, cov, 200)
-        objective = functools.partial(tdp.log_likelihood_neg_binom, theta=theta, 
-                                        obs=obs)
-
+        objective = functools.partial(tdp.log_likelihood_neg_binom, 
+                                        theta=self.theta,
+                                        obs=self.obs)
         mode_x, _, = tdp.newton_raphson_method(objective=objective, 
-                                                Q=Q, mu=alpha, h=1e-4, 
-                                                threshold=1e-6, max_iter=100, 
-                                                init_v=np.ones(n_feat))
-        return np.testing.assert_array_almost_equal(mode_x, gmrf, 0)
+                                                Q=self.Q, 
+                                                mu=self.alpha, 
+                                                h=1e-4, 
+                                                threshold=1e-6,
+                                                max_iter=100,
+                                                init_v=np.ones(self.n_feat))
+        
+        return np.testing.assert_array_almost_equal(mode_x, self.gmrf, 0)
 
+
+    # ---------------------------------------------- #
+    #  tests for the function newton_raphson_method  #
+    # ---------------------------------------------- #
+
+
+    def test_approx_marg_post_of_theta(self):
+        """Tests the approximation of the marginal posterior of theta by 
+        checking that the function can successfully give higher probability to 
+        the parameter that is actually used in generating the data. 
+            Since this is based on sampling, it might give the wrong result 
+        sometimes. However, increasing the number of samples should reduce the
+        odds of this happening."""
+
+        ga_eigvs = linalg.eigvals_banded(self.Q.data[:2])
+        Q_det = np.prod(ga_eigvs[ga_eigvs > 1e-4])
+
+        results = []
+        for curr_theta in [0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5]:
+            objective = functools.partial(tdp.log_likelihood_neg_binom, 
+                                            theta=curr_theta, 
+                                            obs=self.obs)
+            
+            mode_x, ga_Q = tdp.newton_raphson_method(objective, self.Q, 
+                                                    self.alpha, 1e-4, 1e-6, 100,
+                                                    np.ones(self.n_feat))
+            
+            p_theta_y = tdp.approx_marg_post_of_theta(objective,
+                                                        theta=curr_theta,
+                                                        alpha=self.alpha,
+                                                        Q=self.Q,
+                                                        Q_det=Q_det,
+                                                        theta_dist=lambda _: 1,
+                                                        gaus_approx_mean=mode_x,
+                                                        gaus_approx_Q=ga_Q)
+            
+            results.append(p_theta_y)
+        
+        return self.assertEqual(np.argmax(results), 3)
 
 
 ###############################################################################
