@@ -12,6 +12,9 @@ import numpy as np
 
 from scipy import sparse, linalg
 from scipy.stats import nbinom, multivariate_normal
+from scipy.optimize import minimize
+
+import matplotlib.pyplot as plt
 
 
 # ###############################################################################
@@ -276,13 +279,17 @@ class TestConditionalDensities(unittest.TestCase):
     ####################################################
 
     n_feat = 10
-    theta = 0.35
-    alpha = np.full(n_feat, 3)
+    theta = 0.40
+    alpha = np.full(n_feat, 5)
     
     Q, cov = create_prec_and_cov(n_feat, 2, -1)
     
     gmrf, obs = create_synthetic_data(theta, alpha, cov, 400)
+
+    ga_eigvs = linalg.eigvals_banded(Q.data[:2])
+    Q_det = np.prod(ga_eigvs[ga_eigvs > 1e-4])
     
+
     #######################################
     #  end of class variable definitions  #
     #######################################
@@ -312,9 +319,41 @@ class TestConditionalDensities(unittest.TestCase):
         return np.testing.assert_array_almost_equal(mode_x, self.gmrf, 0)
 
 
-    # ---------------------------------------------- #
-    #  tests for the function newton_raphson_method  #
-    # ---------------------------------------------- #
+    # -------------------------------------------------- #
+    #  tests for the function approx_marg_post_of_theta  #
+    # -------------------------------------------------- #
+
+    def neg_p_theta_given_y(self, curr_theta: int) -> float:
+        """Creates the function that calculates the -log p(theta | y) for the
+        generated data.
+
+        Args:
+            curr_theta (int): parameters used in the calculation of the 
+                probability.
+
+        Returns:
+            float: - log p(theta | y)
+        """
+
+        objective = functools.partial(tdp.log_likelihood_neg_binom, 
+                                            theta=curr_theta, 
+                                            obs=self.obs)
+            
+        mode_x, ga_Q = tdp.newton_raphson_method(objective, self.Q, 
+                                                self.alpha, 1e-4, 
+                                                1e-6, 100,
+                                                np.ones(self.n_feat))
+        
+        p_theta_y = tdp.approx_marg_post_of_theta(objective,
+                                                    theta=curr_theta,
+                                                    alpha=self.alpha,
+                                                    Q=self.Q,
+                                                    Q_det=self.Q_det,
+                                                    theta_dist=lambda _: 1,
+                                                    gaus_approx_mean=mode_x,
+                                                    gaus_approx_Q=ga_Q)
+        
+        return -p_theta_y
 
 
     def test_approx_marg_post_of_theta(self):
@@ -325,33 +364,47 @@ class TestConditionalDensities(unittest.TestCase):
         sometimes. However, increasing the number of samples should reduce the
         odds of this happening."""
 
-        ga_eigvs = linalg.eigvals_banded(self.Q.data[:2])
-        Q_det = np.prod(ga_eigvs[ga_eigvs > 1e-4])
-
         results = []
-        for curr_theta in [0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5]:
-            objective = functools.partial(tdp.log_likelihood_neg_binom, 
-                                            theta=curr_theta, 
-                                            obs=self.obs)
-            
-            mode_x, ga_Q = tdp.newton_raphson_method(objective, self.Q, 
-                                                    self.alpha, 1e-4, 1e-6, 100,
-                                                    np.ones(self.n_feat))
-            
-            p_theta_y = tdp.approx_marg_post_of_theta(objective,
-                                                        theta=curr_theta,
-                                                        alpha=self.alpha,
-                                                        Q=self.Q,
-                                                        Q_det=Q_det,
-                                                        theta_dist=lambda _: 1,
-                                                        gaus_approx_mean=mode_x,
-                                                        gaus_approx_Q=ga_Q)
-            
-            results.append(p_theta_y)
+        poss_thetas = np.round(np.arange(0.1, 1, 0.05), 2)
+        for curr_theta in poss_thetas:
+            res = self.neg_p_theta_given_y(curr_theta)
+            results.append(-res)
         
-        return self.assertEqual(np.argmax(results), 3)
+        return self.assertEqual(np.argmax(results), 
+                                np.argmax(poss_thetas==self.theta))
+    
+
+    def test_lbfgs(self):
+        """Tests the lbfgs function, to see if it can find the right mode of 
+        the density function."""
+        
+        result = tdp.lbfgs(p_theta_given_y=self.neg_p_theta_given_y, 
+                            init_guess=0.8,
+                            bounds=[(0.03, 0.97)],
+                            n_hist_updates=30)
+        
+        return self.assertAlmostEqual(result[0], self.theta, 1)
 
 
 ###############################################################################
 
 unittest.main()
+
+
+###############################################################################
+# def read_data(name: str) -> np.ndarray:
+
+#     with open(name, 'r', encoding='utf8') as datafile:
+#         data = []
+#         for line in datafile.read().splitlines()[1:]:
+#             data.append(line.split(",")[1:])
+#         return np.array(data, dtype=int)
+    
+
+# # data = read_data("cage_data_test.csv")
+# # x = np.full(109, 10000)[np.newaxis, :]
+
+# # import time
+# # start = time.time()
+# # print(np.sum(individual_log_neg_binom_likelihood(data, x, np.array([0.2])), 1))
+# # print(f"It took {time.time() - start}")
