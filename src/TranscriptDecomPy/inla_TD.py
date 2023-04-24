@@ -2,6 +2,7 @@ import numpy as np
 
 from scipy import linalg, sparse
 from scipy.stats import nbinom
+from scipy.optimize import minimize
 
 from typing import Callable
 
@@ -34,7 +35,7 @@ def log_likelihood_neg_binom(x: np.ndarray, obs: np.ndarray,
         x_i > 0
         0 <= theta <= 1
     """
-
+    
     n = x * (theta/(1-theta))
     pm_for_single_obs = np.sum(nbinom.logpmf(obs, n, theta), -1)
     
@@ -227,7 +228,7 @@ def newton_raphson_method(objective: Callable, Q: sparse.dia_matrix,
 
 
 # ###############################################################################
-# # p(theta | y)
+# calculating p(theta | y)
 
 def general_determinant(A: sparse.dia_matrix, zero: float=1e-5) -> float:
     """Calculates a general determinant that applies to singular matrices, i.e.,
@@ -304,8 +305,8 @@ def approx_marg_post_of_theta(data_likelihood: Callable,
 
     # ln p(x|theta)
     exponent = -(1/2) * (x - alpha) @ Q @ (x - alpha)[:, np.newaxis]
-    gmrf_prior = np.sqrt(Q_det * ((2*np.pi)**(-dim))) * (np.exp(exponent))[0]
-    gmrf_prior = np.log(gmrf_prior)
+    gmrf_prior = np.sqrt(Q_det * ((2*np.pi)**(-dim))) * (np.exp(exponent))
+    gmrf_prior = np.log(gmrf_prior)[0]
     
     # ln p(theta)
     theta_prior = np.log(theta_dist(theta))
@@ -316,3 +317,47 @@ def approx_marg_post_of_theta(data_likelihood: Callable,
 
     # ln p(theta | y)
     return likelihood + gmrf_prior + theta_prior - ga_full_conditional_x
+
+
+
+###############################################################################
+# exploring p(theta | y)
+
+
+def lbfgs(p_theta_given_y: Callable, init_guess: float, bounds: list,
+            n_hist_updates: int) -> np.ndarray:
+    """Calculates the mode of the objective function using the l-BFGS-B 
+    quasi-Newtonian method. This method uses a limitd amount of computer memory,
+    because it uses only a few vectors that represent the approximation to the
+    Hessian implicitly.
+
+        In the context of this problem, the objective function corresponds to
+    the density function, p(theta | y). Here, use the negative logarithmic 
+    density function. We use the negative, because our original goal is to 
+    maximize p(theta | y), so if we negate it, our goal is now to minimize
+    -p(theta | y). We use the log probability, because it is more numerically
+    stable and since it is a monotone function, the mode for the minimization
+    of the log is the same as the mode for the original problem.
+
+    Args:
+        p_theta_given_y (Callable): objective function to obtain the value that
+            minimizes the function.
+        init_guess (float): initial value to try in the minimization.
+        bounds (list): constraints on the possible values taken by the function.
+        n_hist_updates (int): number of recorded history updates used in the
+            l-BFGS-B method.
+
+    Returns:
+        np.ndarray: input that minimizes the objective function.
+    """
+    
+
+    result = minimize(p_theta_given_y,
+                        init_guess, 
+                        method='L-BFGS-B', 
+                        jac='3-point', 
+                        bounds=bounds,
+                        options={'maxcor': n_hist_updates, 
+                                    'finite_diff_rel_step':1e-3})
+
+    return result.x
