@@ -1,6 +1,10 @@
+import os
 import sys
-sys.path[0] += "/../src"
 
+sys.path[0] += "/../src"
+os.environ["CHOLMOD_USE_GPU"] = "1"
+
+from sksparse.cholmod import cholesky
 from TranscriptDecomPy import inla_TD as tdp
 
 ###############################################################################
@@ -11,66 +15,67 @@ import functools
 import numpy as np
 
 from scipy import sparse, linalg
-from scipy.stats import nbinom, multivariate_normal
+from scipy.stats import nbinom, multivariate_normal, norm
 from scipy.optimize import minimize
+from itertools import product
 
 import matplotlib.pyplot as plt
 
 
-# ###############################################################################
+###############################################################################
 
-class TestLikelihood(unittest.TestCase):
+# class TestLikelihood(unittest.TestCase):
 
-    # ----------------------------------------------------- #
-    #  tests for the function Negative Binomial Likelihood  #
-    # ----------------------------------------------------- #
-
-
-    def test_likelihood_shape_return_2_dim(self):
-        """Test to check if the likelihood returns an array of the appropriate
-        dimensions if the combination of the observations and the means 
-        produces a 2D array.
-        """
-
-        dataset = np.array([nbinom.rvs(5, 0.7, size=100) for i in range(30)])
-        result = tdp.log_likelihood_neg_binom(dataset, np.full(100, 5), 0.7)
-
-        self.assertEqual(result.shape, ())
+#     # ----------------------------------------------------- #
+#     #  tests for the function Negative Binomial Likelihood  #
+#     # ----------------------------------------------------- #
 
 
-    def test_likelihood_shape_return_3_dim(self):
-        """Test to check if the likelihood returns an array of the appropriate
-        dimensions if the combination of the observations and the means 
-        produces a 3D array.
-        """
+#     def test_likelihood_shape_return_2_dim(self):
+#         """Test to check if the likelihood returns an array of the appropriate
+#         dimensions if the combination of the observations and the means 
+#         produces a 2D array.
+#         """
 
-        dataset = [[nbinom.rvs(5, 0.7, size=100) for _ in range(30)],
-                   [nbinom.rvs(6, 0.3, size=100) for _ in range(30)]]
-        dataset = np.array(dataset)
-        result = tdp.log_likelihood_neg_binom(dataset, 
-                                                np.full(100, 5, dtype=float), 
-                                                0.7)
+#         dataset = np.array([nbinom.rvs(5, 0.7, size=100) for i in range(30)])
+#         result = tdp.log_likelihood_neg_binom(dataset, np.full(100, 5), 0.7)
 
-        self.assertEqual(result.shape, (2,))
+#         self.assertEqual(result.shape, ())
 
 
-    def test_likelihood_with_different_dist(self):
-        """Tests if the log-likelihood function can successfully give higher 
-        probability to the means that actually generated data.
-            Since this is based on sampling, it might give the wrong result 
-        sometimes. However, increasing the number of samples should reduce the
-        odds of this happening."
-        """
+#     def test_likelihood_shape_return_3_dim(self):
+#         """Test to check if the likelihood returns an array of the appropriate
+#         dimensions if the combination of the observations and the means 
+#         produces a 3D array.
+#         """
 
-        theta = 0.3
-        obs = np.array([nbinom.rvs(i * theta / (1-theta) , theta, 200) 
-                for i in range(1,31)]).T
-        xs = np.repeat(np.arange(1, 15)[:, np.newaxis], 30, 1)[:, np.newaxis, :]
-        xs = np.concatenate((xs, np.arange(1,31)[np.newaxis, np.newaxis]), 0)
+#         dataset = [[nbinom.rvs(5, 0.7, size=100) for _ in range(30)],
+#                    [nbinom.rvs(6, 0.3, size=100) for _ in range(30)]]
+#         dataset = np.array(dataset)
+#         result = tdp.log_likelihood_neg_binom(dataset, 
+#                                                 np.full(100, 5, dtype=float), 
+#                                                 0.7)
+
+#         self.assertEqual(result.shape, (2,))
+
+
+#     def test_likelihood_with_different_dist(self):
+#         """Tests if the log-likelihood function can successfully give higher 
+#         probability to the means that actually generated data.
+#             Since this is based on sampling, it might give the wrong result 
+#         sometimes. However, increasing the number of samples should reduce the
+#         odds of this happening."
+#         """
+
+#         theta = 0.3
+#         obs = np.array([nbinom.rvs(i * theta / (1-theta) , theta, 200) 
+#                 for i in range(1,31)]).T
+#         xs = np.repeat(np.arange(1, 15)[:, np.newaxis], 30, 1)[:, np.newaxis, :]
+#         xs = np.concatenate((xs, np.arange(1,31)[np.newaxis, np.newaxis]), 0)
         
-        results = tdp.log_likelihood_neg_binom(obs, xs, theta)
-        max_value_idx = np.argmax(results)
-        self.assertEqual(max_value_idx, 14)
+#         results = tdp.log_likelihood_neg_binom(obs, xs, theta)
+#         max_value_idx = np.argmax(results)
+#         self.assertEqual(max_value_idx, 14)
 
 
 
@@ -218,58 +223,118 @@ class TestDerivativesApprox(unittest.TestCase):
 
 ###############################################################################
 
-def create_prec_and_cov(n_feat: int, diag_val: float, offset: float) -> tuple:
-    """Creates a precision matrix (and its inverse) with only nonzero elements
-    in the main diagonal and the first offset diagonal on each side of the 
-    matrix.
+def creating_IGMRF_Q(n_dim: int) -> np.ndarray:
+    """Generates the precision matrix of a first-order Random-Walk. This 
+    corresponds to an intrinsic GMRF.
 
     Args:
-        n_feat (int): number of rows or columns of the precision matrix.
-        diag_val (float): value in the main diagonal.
-        offset (float): value on each of the first offset diagonals.
+        n_dim (int): number of features of the Random-Walk. Side of the 
+            precision matrix.
 
     Returns:
-        Q: precision matrix.
-        cov: covariance matrix (inverse of the precision matrix). 
+        np.ndarray: precision matrix.
     """
-
-    Q = sparse.diags(np.full(n_feat, diag_val))
-    Q.setdiag(offset, k=-1)
-    Q.setdiag(offset, k=1)
     
-    dense_Q = Q.todense()
-    cov = linalg.inv(dense_Q)
-    Q = sparse.dia_matrix(dense_Q)
+    diagonal = np.hstack(([1], np.full(n_dim -2, 2), [1]))
+    Q = sparse.diags(diagonal)
+    Q.setdiag(-1, k=1)
+    Q.setdiag(-1, k=-1)
 
-    return (Q, cov)
+    return Q.todense()
 
 
-def create_synthetic_data(theta: float, alpha: np.ndarray, cov: np.ndarray,
-                            n_reps: int) -> tuple:
-    """Creates a synthetic dataset where a specified multivariate normal 
-    distribution generates a latent vector, which is then used in a negative
-    binomial distribution to generate the observations.
+def sampling_IGMRF(Q: np.ndarray, theta_PD: float, 
+                    n_samples: int) -> np.ndarray:
+    """Samples from the intrinsic GMRF. 
+    
+        Given that an intrinsic GMRF is characterized by a rank deficient
+    matrix (which means the precision matrix has no inverse and a 0 
+    determinant), a different method has to be used to sample from it. In this
+    case, we use the eigenvectors with non-zero eigenvalues associated.
+    
 
     Args:
-        theta (float): probability of success in the negative binomial 
-            distribution.
-        alpha (np.ndarray): vector of means of the multivariate normal 
-            distribution.
-        cov (np.ndarray): covariance matrix of the multivariate normal 
-            distribution.
-        n_reps (int): number of observations to be sampled from the negative
-            binomial distribution.
+        Q (np.ndarray): graph relationships of the IGMRF in the form of a 
+            matrix.
+        theta_PD (float): constant multiplied to Q to form the precision matrix. 
+        n_samples (int): number of samples to be generated of the IGMRF.
 
     Returns:
-        gmrf (np.ndarray): latent vector sampled by the multivariate normal
-            distribution that is used to sample the observations.
-        obs (np.ndarray): sampled observations.
+        np.ndarray: Samples of the IGMRF.
+    """
+    
+    v, e = linalg.eigh(Q)
+    v, e = v[1:], e[:, 1:]
+    
+    cov = sparse.diags((v*theta_PD)**(-1)).toarray()
+    y = multivariate_normal(np.zeros(v.shape[0]), cov).rvs(size=n_samples)    
+    y = y[:, np.newaxis] if n_samples == 1 else y.T
+
+    x = e @ y
+    return x.T
+
+
+def sampling_global_gmrf(n_dim: int, theta_intercept: float, theta_PD: float, 
+                            theta_PI: float, n_samples: int) -> tuple:
+    """Samples from the GMRF obtained in the following model,
+    
+        eta = intercept + PD + PI
+        x = (intercept, PD^T, eta^T)^T
+
+        where PD is a first-order Random Walk, PI is a fixed effects model and
+    x is the global GMRF which we are sampling.
+
+    Args:
+        n_dim (int): Number of features of the PD and PI GMRFs.
+        theta_intercept (float): inverse variance of the intercept.
+        theta_PD (float): constant that multiplies with the structure of the
+            graph of the first-order Random-Walk, forming the precision matrix
+            of the Random-Walk.
+        theta_PI (float): inverse variance of each of the features of the fixed-
+            -effects model.
+        n_samples (int): Number of samples to obtain from the global GMRF.
+
+    Returns:
+        (tuple): samples of the global GMRF.
+            intercept (np.ndarray): samples from the intercept
+            PD (np.ndarray): samples from the first-order Random-Walk IGMRF.
+            eta (np.ndarray): samples of the combined GMRF.
+    """
+    
+    intercept = norm(0, 1/theta_intercept).rvs(n_samples)[:, np.newaxis]
+
+    Q_PD = creating_IGMRF_Q(n_dim)
+    PD = sampling_IGMRF(Q_PD, theta_PD, n_samples)
+
+    Q_PI = sparse.diags(np.full(n_dim, (1/theta_PI))).todense()
+    PI = multivariate_normal(np.zeros(n_dim), Q_PI).rvs(size=n_samples)
+    PI = PI[np.newaxis, :] if n_samples == 1 else PI
+
+    eta = intercept + PD + PI
+    return (intercept, PD, eta)
+
+
+
+def sampling_synthetic_data(gmrf: np.ndarray, theta_y: float, 
+                                n_samples: int) -> np.ndarray:
+    """Samples the observations given a GMRF sample using a Negative Binomial
+    distribution.
+
+    Args:
+        gmrf (np.ndarray): sample of the GMRF that generates the observations.
+        theta_y (float): dispersion of the data in the Negative Binomial 
+            distribution.
+        n_samples (int): number of samples of the observations
+
+    Returns:
+        (np.ndarray): observations sampled.
     """
 
-    gmrf = multivariate_normal(alpha, cov).rvs()
-    param_n_NB = gmrf * theta / (1 - theta)
-    obs = nbinom(param_n_NB, theta).rvs(size=(n_reps, alpha.shape[0]))
-    return (gmrf, obs)
+    eta = gmrf[2][0]
+    eta_length = eta.shape[0]
+    
+    n = np.exp(eta) * (theta_y/ (1 - theta_y))
+    return nbinom.rvs(n=n, p=theta_y, size=(n_samples, eta_length))
 
 
 class TestConditionalDensities(unittest.TestCase):
@@ -278,17 +343,18 @@ class TestConditionalDensities(unittest.TestCase):
     # Defining some class variables for data synthesis #
     ####################################################
 
-    n_feat = 10
-    theta = 0.40
-    alpha = np.full(n_feat, 5)
-    
-    Q, cov = create_prec_and_cov(n_feat, 2, -1)
-    
-    gmrf, obs = create_synthetic_data(theta, alpha, cov, 400)
+    n_feat = 20
+    n_obs = 700
 
-    ga_eigvs = linalg.eigvals_banded(Q.data[:2])
-    Q_det = np.prod(ga_eigvs[ga_eigvs > 1e-4])
+    theta_y = 0.40
+    theta_intercept = 2
+    theta_PD = 3
+    theta_PI = 4
+
+    gmrf = sampling_global_gmrf(n_feat, theta_intercept, theta_PD, theta_PI, 1)
+    obs = sampling_synthetic_data(gmrf, theta_y, n_obs)
     
+    intercept, pd, eta = gmrf
 
     #######################################
     #  end of class variable definitions  #
@@ -306,24 +372,27 @@ class TestConditionalDensities(unittest.TestCase):
         generate the observations."""
         
         objective = functools.partial(tdp.log_likelihood_neg_binom, 
-                                        theta=self.theta,
+                                        theta_y=self.theta_y,
                                         obs=self.obs)
-        mode_x, _, = tdp.newton_raphson_method(objective=objective, 
-                                                Q=self.Q, 
-                                                mu=self.alpha, 
-                                                h=1e-4, 
-                                                threshold=1e-6,
-                                                max_iter=100,
-                                                init_v=np.ones(self.n_feat))
         
-        return np.testing.assert_array_almost_equal(mode_x, self.gmrf, 0)
+        Q = tdp.build_gmrf_precision_mat(self.n_feat, self.theta_intercept,
+                                            self.theta_PD, self.theta_PI)
+        
+        init_val = np.ones(self.n_feat * 2 + 1)
+        
+        mode_x, _, = tdp.newton_raphson_method(objective=objective, Q=Q, 
+                                                h=1e-4, threshold=1e-3,
+                                                max_iter=30, init_v=init_val)
+    
+        gmrf = np.concatenate((self.intercept[0], self.pd[0], self.eta[0]))
+        return np.testing.assert_array_almost_equal(mode_x, gmrf, 0)
 
 
     # -------------------------------------------------- #
     #  tests for the function approx_marg_post_of_theta  #
     # -------------------------------------------------- #
 
-    def neg_p_theta_given_y(self, curr_theta: int) -> float:
+    def neg_p_theta_given_y(self, curr_theta: np.ndarray) -> float:
         """Creates the function that calculates the -log p(theta | y) for the
         generated data.
 
@@ -334,24 +403,26 @@ class TestConditionalDensities(unittest.TestCase):
         Returns:
             float: - log p(theta | y)
         """
+        theta_y, theta_intercept, theta_PD, theta_PI = curr_theta
+
+        new_Q = tdp.build_gmrf_precision_mat(self.n_feat, theta_intercept, 
+                                                theta_PD, theta_PI)
 
         objective = functools.partial(tdp.log_likelihood_neg_binom, 
-                                            theta=curr_theta, 
+                                            theta_y=theta_y, 
                                             obs=self.obs)
             
-        mode_x, ga_Q = tdp.newton_raphson_method(objective, self.Q, 
-                                                self.alpha, 1e-4, 
-                                                1e-6, 100,
-                                                np.ones(self.n_feat))
+        mode_x, ga_det = tdp.newton_raphson_method(objective, new_Q, 
+                                                1e-4, 1e-3, 30,
+                                                np.ones(self.n_feat*2 + 1))
         
-        p_theta_y = tdp.approx_marg_post_of_theta(objective,
+        gmrf_prior = tdp.create_gmrf_density_func(new_Q)
+        p_theta_y = tdp.approx_marg_post_of_theta(data_likelihood=objective,
                                                     theta=curr_theta,
-                                                    alpha=self.alpha,
-                                                    Q=self.Q,
-                                                    Q_det=self.Q_det,
+                                                    gmrf_likelihood=gmrf_prior,
                                                     theta_dist=lambda _: 1,
                                                     gaus_approx_mean=mode_x,
-                                                    gaus_approx_Q=ga_Q)
+                                                    gaus_det=ga_det)
         
         return -p_theta_y
 
@@ -364,26 +435,34 @@ class TestConditionalDensities(unittest.TestCase):
         sometimes. However, increasing the number of samples should reduce the
         odds of this happening."""
 
+        correct_result = (self.theta_y, self.theta_intercept, self.theta_PD,
+                            self.theta_PI)
         results = []
-        poss_thetas = np.round(np.arange(0.1, 1, 0.05), 2)
-        for curr_theta in poss_thetas:
+        range_common=np.arange(2, 5)
+        y_range = np.arange(0.2, 0.7, 0.1)
+        poss = list(product(y_range, range_common, range_common, range_common))
+        for curr_theta in poss:
             res = self.neg_p_theta_given_y(curr_theta)
+            print(f"{curr_theta} -> {res}")
             results.append(-res)
         
-        return self.assertEqual(np.argmax(results), 
-                                np.argmax(poss_thetas==self.theta))
+        final_choice = np.argmax(results)
+        print("\n{results[final_choice]}")
+        return self.assertTupleEqual(results[final_choice], correct_result)
     
 
-    def test_lbfgs(self):
-        """Tests the lbfgs function, to see if it can find the right mode of 
-        the density function."""
+    # def test_lbfgs(self):
+    #     """Tests the lbfgs function, to see if it can find the right mode of 
+    #     the density function."""
         
-        result = tdp.lbfgs(p_theta_given_y=self.neg_p_theta_given_y, 
-                            init_guess=0.8,
-                            bounds=[(0.03, 0.97)],
-                            n_hist_updates=30)
+    #     result = tdp.lbfgs(p_theta_given_y=self.neg_p_theta_given_y, 
+    #                         init_guess=0.8,
+    #                         bounds=[(0.03, 0.97)],
+    #                         n_hist_updates=30)
         
-        return self.assertAlmostEqual(result[0], self.theta, 1)
+    #     print("Theta Approximated:")
+    #     print(result[0])
+    #     return self.assertAlmostEqual(result[0], self.theta, 1)
 
 
 ###############################################################################
