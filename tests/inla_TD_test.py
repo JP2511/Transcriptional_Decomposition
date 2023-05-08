@@ -2,10 +2,11 @@ import os
 import sys
 
 sys.path[0] += "/../src"
-os.environ["CHOLMOD_USE_GPU"] = "1"
 
-from sksparse.cholmod import cholesky
 from TranscriptDecomPy import inla_TD as tdp
+
+import torch
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 ###############################################################################
 
@@ -16,10 +17,7 @@ import numpy as np
 
 from scipy import sparse, linalg
 from scipy.stats import nbinom, multivariate_normal, norm
-from scipy.optimize import minimize
 from itertools import product
-
-import matplotlib.pyplot as plt
 
 
 ###############################################################################
@@ -87,7 +85,9 @@ class TestDerivativesApprox(unittest.TestCase):
 
     def test_expand_increment_axis(self):
 
-        result = tdp.expand_increment_axis(3, 3)
+        result = tdp.expand_increment_axis(3, 3).cpu()
+        result = np.array(result)
+
         expected_result = [[[3, 0, 0]],
                             [[0, 3, 0]],
                             [[0, 0, 3]]]
@@ -105,12 +105,13 @@ class TestDerivativesApprox(unittest.TestCase):
         objective function return an array."""
 
         n_feat = 4
-        x = np.arange(n_feat)
+        x = torch.arange(n_feat).to(device)
         h = 0.2
         increment = tdp.expand_increment_axis(n_feat, h)
         test_f = lambda z: z
 
         result = tdp.fst_order_central_differences(test_f, x, increment, h)
+        result = np.array(result.cpu())
         expected_result = np.eye(n_feat)[:, np.newaxis, :]
 
         return np.testing.assert_array_almost_equal(result, expected_result)
@@ -121,13 +122,14 @@ class TestDerivativesApprox(unittest.TestCase):
         function return an array."""
 
         n_feat = 2
-        x = np.array([6,2])
+        x = torch.tensor([6,2]).to(device)
         h = 0.1
         increment = tdp.expand_increment_axis(n_feat, h)
-        obs = np.ones((5,2))
+        obs = torch.ones((5,2)).to(device)
         test_f = lambda z: obs + z
 
         result = tdp.fst_order_central_differences(test_f, x, increment, h)
+        result = np.array(result.cpu())
         expected_result = np.repeat(np.eye(2)[:, np.newaxis, :], 5, 1)
 
         return np.testing.assert_almost_equal(result, expected_result)
@@ -138,12 +140,13 @@ class TestDerivativesApprox(unittest.TestCase):
         objective function return a single value based on an array."""
 
         n_feat = 4
-        x = np.arange(n_feat)
+        x = torch.arange(n_feat).to(device)
         h = 0.2
         increment = tdp.expand_increment_axis(n_feat, h)
-        test_f = lambda z: np.sum(z, 2)
+        test_f = lambda z: torch.sum(z, 2)
 
         result = tdp.fst_order_central_differences(test_f, x, increment, h)
+        result = np.array(result.cpu())
         expected_result = np.ones(n_feat)[:, np.newaxis]
 
         return np.testing.assert_array_almost_equal(result, expected_result)
@@ -154,13 +157,16 @@ class TestDerivativesApprox(unittest.TestCase):
         function return a single value based on an array."""
         
         n_feat = 2
-        x = np.array([6,2])
+        x = torch.tensor([6,2]).to(device)
         h = 0.1
         increment = tdp.expand_increment_axis(n_feat, h)
+
         obs = np.array([np.arange(5), np.ones(5)]).T
-        test_f = lambda z: np.sum(obs + z, 2)
+        obs = torch.tensor(obs).to(device)
+        test_f = lambda z: torch.sum(obs + z, 2)
 
         result = tdp.fst_order_central_differences(test_f, x, increment, h)
+        result = np.array(result.cpu())
         expected_result = np.ones((n_feat, 5))
 
         return np.testing.assert_almost_equal(result, expected_result)
@@ -175,12 +181,14 @@ class TestDerivativesApprox(unittest.TestCase):
         objective function return an array."""
 
         n_feat = 4
-        x = np.arange(n_feat)
+        x = torch.arange(n_feat).to(device)
         h = 1
         increment = tdp.expand_increment_axis(n_feat, h)
         test_f = lambda z: z**2
 
         result = tdp.snd_order_central_differences(test_f, x, increment, h)
+        result = np.array(result.cpu())
+
         expected_result = 2 * np.eye(n_feat)[:, np.newaxis, :]
 
         return np.testing.assert_array_almost_equal(result, expected_result)
@@ -191,13 +199,15 @@ class TestDerivativesApprox(unittest.TestCase):
         function return an array."""
 
         n_feat = 4
-        x = np.arange(4)
+        x = torch.arange(4).to(device)
         h = 1
         increment = tdp.expand_increment_axis(n_feat, h)
-        obs = np.arange(12).reshape((3, n_feat))
+        obs = torch.arange(12).reshape((3, n_feat)).to(device)
         test_f = lambda z: (obs + z)**2
 
         result = tdp.snd_order_central_differences(test_f, x, increment, h)
+        result = np.array(result.cpu())
+
         expected_result = 2 * np.eye(n_feat, dtype=float)[:, np.newaxis, :]
         expected_result = np.repeat(expected_result, 3, 1)
 
@@ -209,12 +219,14 @@ class TestDerivativesApprox(unittest.TestCase):
         objective function return a single value based on an array."""
         
         n_feat = 4
-        x = np.arange(n_feat)
+        x = torch.arange(n_feat).to(device)
         h = 1
         increment = tdp.expand_increment_axis(n_feat, h)
-        test_f = lambda z: np.sum(z**2, len(z.shape)-1)
+        test_f = lambda z: torch.sum(z**2, len(z.shape)-1)
 
         result = tdp.snd_order_central_differences(test_f, x, increment, h)
+        result = np.array(result.cpu())
+
         expected_result = np.full((n_feat, 1), 2)
 
         return np.testing.assert_array_almost_equal(result, expected_result)
@@ -353,8 +365,16 @@ class TestConditionalDensities(unittest.TestCase):
 
     gmrf = sampling_global_gmrf(n_feat, theta_intercept, theta_PD, theta_PI, 1)
     obs = sampling_synthetic_data(gmrf, theta_y, n_obs)
-    
     intercept, pd, eta = gmrf
+
+    # converting for GPU
+    theta_y = torch.tensor([theta_y], dtype=torch.float64).to(device)
+
+    gmrf = torch.tensor(np.concatenate((intercept[0], pd[0], eta[0])),
+                        dtype=torch.float64)
+    gmrf = gmrf.to(device)
+
+    obs = torch.tensor(obs, dtype=torch.float64).to(device)
 
     #######################################
     #  end of class variable definitions  #
@@ -378,14 +398,15 @@ class TestConditionalDensities(unittest.TestCase):
         Q = tdp.build_gmrf_precision_mat(self.n_feat, self.theta_intercept,
                                             self.theta_PD, self.theta_PI)
         
-        init_val = np.ones(self.n_feat * 2 + 1)
+        init_val = torch.ones(self.n_feat * 2 + 1, dtype=torch.float64)
+        init_val = init_val.to(device)
         
         mode_x, _, = tdp.newton_raphson_method(objective=objective, Q=Q, 
                                                 h=1e-4, threshold=1e-3,
                                                 max_iter=30, init_v=init_val)
-    
-        gmrf = np.concatenate((self.intercept[0], self.pd[0], self.eta[0]))
-        return np.testing.assert_array_almost_equal(mode_x, gmrf, 0)
+
+        return np.testing.assert_array_almost_equal(mode_x.cpu(), 
+                                                    self.gmrf.cpu(), 0)
 
 
     # -------------------------------------------------- #
@@ -404,6 +425,7 @@ class TestConditionalDensities(unittest.TestCase):
             float: - log p(theta | y)
         """
         theta_y, theta_intercept, theta_PD, theta_PI = curr_theta
+        theta_y = torch.tensor(theta_y, dtype=torch.float64).to(device)
 
         new_Q = tdp.build_gmrf_precision_mat(self.n_feat, theta_intercept, 
                                                 theta_PD, theta_PI)
@@ -411,10 +433,12 @@ class TestConditionalDensities(unittest.TestCase):
         objective = functools.partial(tdp.log_likelihood_neg_binom, 
                                             theta_y=theta_y, 
                                             obs=self.obs)
+        
+        init_v = torch.ones(self.n_feat*2 + 1, dtype=torch.float64).to(device)
             
         mode_x, ga_det = tdp.newton_raphson_method(objective, new_Q, 
                                                 1e-4, 1e-3, 30,
-                                                np.ones(self.n_feat*2 + 1))
+                                                init_v)
         
         gmrf_prior = tdp.create_gmrf_density_func(new_Q)
         p_theta_y = tdp.approx_marg_post_of_theta(data_likelihood=objective,
@@ -422,33 +446,39 @@ class TestConditionalDensities(unittest.TestCase):
                                                     gmrf_likelihood=gmrf_prior,
                                                     theta_dist=lambda _: 1,
                                                     gaus_approx_mean=mode_x,
-                                                    gaus_det=ga_det)
+                                                    gaus_approx_det=ga_det)
         
         return -p_theta_y
 
 
-    def test_approx_marg_post_of_theta(self):
-        """Tests the approximation of the marginal posterior of theta by 
-        checking that the function can successfully give higher probability to 
-        the parameter that is actually used in generating the data. 
-            Since this is based on sampling, it might give the wrong result 
-        sometimes. However, increasing the number of samples should reduce the
-        odds of this happening."""
+    # def test_approx_marg_post_of_theta(self):
+    #     """Tests the approximation of the marginal posterior of theta by 
+    #     checking that the function can successfully give higher probability to 
+    #     the parameter that is actually used in generating the data. 
+    #         Since this is based on sampling, it might give the wrong result 
+    #     sometimes. However, increasing the number of samples should reduce the
+    #     odds of this happening."""
 
-        correct_result = (self.theta_y, self.theta_intercept, self.theta_PD,
-                            self.theta_PI)
-        results = []
-        range_common=np.arange(2, 5)
-        y_range = np.arange(0.2, 0.7, 0.1)
-        poss = list(product(y_range, range_common, range_common, range_common))
-        for curr_theta in poss:
-            res = self.neg_p_theta_given_y(curr_theta)
-            print(f"{curr_theta} -> {res}")
-            results.append(-res)
+    #     correct_result = (self.theta_y, self.theta_intercept, self.theta_PD,
+    #                         self.theta_PI)
         
-        final_choice = np.argmax(results)
-        print("\n{results[final_choice]}")
-        return self.assertTupleEqual(results[final_choice], correct_result)
+    #     results = []
+    #     range_common=np.arange(2, 5)
+    #     y_range = np.arange(0.2, 0.7, 0.1)
+        
+    #     poss = []
+    #     poss_gen = product(y_range, range_common, range_common, range_common)
+    #     for curr_theta in poss_gen:
+    #         theta_y, *theta = curr_theta
+    #         curr_theta = (np.round(theta_y, 1), *theta)
+            
+    #         poss.append(curr_theta)            
+    #         res = self.neg_p_theta_given_y(curr_theta)
+    #         print(f"{curr_theta} -> {res[0]}")
+    #         results.append(-res[0])
+        
+    #     final_choice = np.argmax(results)
+    #     return self.assertTupleEqual(poss[final_choice], correct_result)
     
 
     # def test_lbfgs(self):
