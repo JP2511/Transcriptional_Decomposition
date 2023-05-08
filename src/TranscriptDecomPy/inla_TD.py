@@ -14,6 +14,11 @@ from scipy import linalg, sparse
 from scipy.stats import nbinom
 from scipy.optimize import minimize
 
+import torch
+from torch.distributions import NegativeBinomial
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
 
 from typing import Callable
 
@@ -21,8 +26,8 @@ from typing import Callable
 ###############################################################################
 
 
-def log_likelihood_neg_binom(x: np.ndarray, obs: np.ndarray, 
-                                theta_y: float) -> np.ndarray:
+def log_likelihood_neg_binom(x: torch.tensor, obs: torch.tensor, 
+                                theta_y: torch.tensor) -> torch.tensor:
     """Calculates the log likelihood of the negative binomial distribution. It 
     is assumed that a point in this distribution is multivariate. As such, the
     log-likelihood of a such a point corresponds to the sum of the 
@@ -31,16 +36,16 @@ def log_likelihood_neg_binom(x: np.ndarray, obs: np.ndarray,
     value obtained corresponds to the sum of the log-likelihood of each point. 
 
     Args:
-        x (np.ndarray): Gaussian Markov Random Field sample. If it contains n
+        x (torch.tensor): Gaussian Markov Random Field sample. If it contains n
             elements, only the last (n-1)//2 elements will be used.
-        obs (np.ndarray): observations of which to calculate the probability 
+        obs (torch.tensor): observations of which to calculate the probability 
             mass (pmf).
-        theta_y (float): success probability in experiment in the negative 
-            binomial distribution.
+        theta_y (torch.tensor): success probability in experiment in the 
+            negative binomial distribution.
 
     Returns:
-        np.ndarray: log likelihood of the point given the specified negative 
-            binomial distribution.
+        pm_for_single_obs (torch.tensor): log likelihood of the point given the
+            specified negative binomial distribution.
 
     Requires:
         obs_i > 0
@@ -51,11 +56,13 @@ def log_likelihood_neg_binom(x: np.ndarray, obs: np.ndarray,
     n_feat = (x.shape[-1] -1) // 2
     x = x[:, :, -n_feat:] if len(x.shape) > 1 else x[-n_feat:]
     
-    n = np.exp(x) * (theta_y/ (1 - theta_y))
-    pm_for_single_obs = np.sum(nbinom.logpmf(obs, n, theta_y), -1)
+    n = torch.exp(x) * (theta_y/ (1 - theta_y))
+
+    p_NB = NegativeBinomial(n, 1-theta_y).log_prob(obs)
+    pm_for_single_obs = torch.sum(p_NB, -1)
     
     if len(pm_for_single_obs.shape) > 0:
-        return np.sum(pm_for_single_obs, -1)
+        return torch.sum(pm_for_single_obs, -1)
     
     return pm_for_single_obs
 
@@ -146,7 +153,7 @@ def create_gmrf_density_func(Q: sparse.csc_matrix) -> Callable:
 
 ###############################################################################
 
-def expand_increment_axis(n_feat: int, h: float) -> np.ndarray:
+def expand_increment_axis(n_feat: int, h: float) -> torch.tensor:
     """Creates an expanded matrix that contains all the vectors necessary to
     individually increment each feature while not changing the other features.
 
@@ -167,7 +174,7 @@ def expand_increment_axis(n_feat: int, h: float) -> np.ndarray:
             increment.
     """
 
-    return h * np.eye(n_feat)[:, np.newaxis, :]
+    return (h * torch.eye(n_feat, dtype=torch.float64)[:, None, :]).to(device)
 
 
 def fst_order_central_differences(objective: Callable, x: np.ndarray,
@@ -201,8 +208,8 @@ def fst_order_central_differences(objective: Callable, x: np.ndarray,
     return (objective(x + increment) - objective(x - increment)) / (2*h)
 
 
-def snd_order_central_differences(objective: Callable, x: np.ndarray,
-                                    increment: np.ndarray, 
+def snd_order_central_differences(objective: Callable, x: torch.tensor,
+                                    increment: torch.tensor, 
                                     h: float) -> float:
     """Approximates the second derivative of a function using finite 
     differences, in particular using second order central differences. This 
@@ -211,10 +218,10 @@ def snd_order_central_differences(objective: Callable, x: np.ndarray,
 
     Args:
         objective (Callable): function whose derivative we want to approximate.
-        x (np.ndarray): value around which we want the approximation to the 
+        x (torch.tensor): value around which we want the approximation to the 
             derivative.
-        increment (np.ndarray): 3-dimensional array containing the vectors that
-            increment each feature of x individually based on h.
+        increment (torch.tensor): 3-dimensional array containing the vectors 
+            that increment each feature of x individually based on h.
         h (float): step of the approximation. Ideally, it should be as close to
             zero as possible.
 
@@ -230,7 +237,7 @@ def snd_order_central_differences(objective: Callable, x: np.ndarray,
             corresponds to the features of x.
         the step actually used in the increment array should be h.
     """
-    
+
     diffs = objective(x + increment) - 2*objective(x) + objective(x - increment)
     return diffs / (h**2)
 
@@ -239,27 +246,29 @@ def snd_order_central_differences(objective: Callable, x: np.ndarray,
 ###############################################################################
 # Newton-Raphson method
 
-def approx_taylor_expansion(objective: Callable, x: np.ndarray, 
-                                h: np.ndarray) -> tuple:
+def approx_taylor_expansion(objective: Callable, x: torch.tensor, 
+                                h: torch.tensor) -> tuple:
     """Approximates the second and third terms of a quadratic Taylor expansion.
 
     Args:
         objective (Callable): function we are expanding.
-        x (np.ndarray): value around which we are performing the Taylor 
+        x (torch.tensor): value around which we are performing the Taylor 
             expansion.
-        h (np.ndarray): step of the approximation. Ideally, it should be as 
+        h (torch.tensor): step of the approximation. Ideally, it should be as 
             close to zero as possible.
 
     Returns:
-        b: approximate second term of the quadratic Taylor expansion.
-        c: approximate third term of the quadratic Taylor expansion.
+        b (torch.tensor): approximate second term of the quadratic Taylor
+            expansion.
+        c (torch.tensor): approximate third term of the quadratic Taylor
+            expansion.
     """
 
     increment = expand_increment_axis(x.shape[0], h)
     c = - snd_order_central_differences(objective, x, increment, h)
 
     b = fst_order_central_differences(objective, x, increment, h)
-    b += x * c # verify
+    b += x * c
     return (b, c)
 
 
@@ -309,13 +318,14 @@ def newton_raphson_method(objective: Callable,
     current_x = init_v
     for _ in range(max_iter):
         b, c = approx_taylor_expansion(objective, current_x, h)
+        b = b.to('cpu')
+        c = np.array(c.to('cpu'))
 
         ## Calculates the mean solving an equation of the type: 
         ##    matrix_A @ x = b
         matrix_A = Q + sparse.diags(c, format='csc')
         chol_factor = cholesky(matrix_A)
-        new_x = chol_factor(b)
-
+        new_x = torch.tensor(chol_factor(b), dtype=torch.float64).to(device)
 
         if linalg.norm(b) < threshold:
             return (new_x, np.exp(chol_factor.logdet()))
@@ -391,10 +401,10 @@ def approx_marg_post_of_theta(data_likelihood: Callable,
     dim = x.shape[0]
 
     # ln p(y|x, theta)
-    likelihood = data_likelihood(x)
+    likelihood = data_likelihood(x).cpu()
 
     # ln p(x|theta)
-    gmrf_prior = np.log(gmrf_likelihood(x))
+    gmrf_prior = np.log(gmrf_likelihood(np.array(x.cpu())))
     
     # ln p(theta)
     theta_prior = np.log(theta_dist(theta))
