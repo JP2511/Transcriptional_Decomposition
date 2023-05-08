@@ -1,4 +1,3 @@
-import os
 import sys
 
 sys.path[0] += "/../src"
@@ -22,58 +21,75 @@ from itertools import product
 
 ###############################################################################
 
-# class TestLikelihood(unittest.TestCase):
+class TestLikelihood(unittest.TestCase):
 
-#     # ----------------------------------------------------- #
-#     #  tests for the function Negative Binomial Likelihood  #
-#     # ----------------------------------------------------- #
-
-
-#     def test_likelihood_shape_return_2_dim(self):
-#         """Test to check if the likelihood returns an array of the appropriate
-#         dimensions if the combination of the observations and the means 
-#         produces a 2D array.
-#         """
-
-#         dataset = np.array([nbinom.rvs(5, 0.7, size=100) for i in range(30)])
-#         result = tdp.log_likelihood_neg_binom(dataset, np.full(100, 5), 0.7)
-
-#         self.assertEqual(result.shape, ())
+    # ----------------------------------------------------- #
+    #  tests for the function Negative Binomial Likelihood  #
+    # ----------------------------------------------------- #
 
 
-#     def test_likelihood_shape_return_3_dim(self):
-#         """Test to check if the likelihood returns an array of the appropriate
-#         dimensions if the combination of the observations and the means 
-#         produces a 3D array.
-#         """
+    def test_likelihood_shape_return_2_dim(self):
+        """Test to check if the likelihood returns an array of the appropriate
+        dimensions if the combination of the observations and the means 
+        produces a 2D array.
+        """
 
-#         dataset = [[nbinom.rvs(5, 0.7, size=100) for _ in range(30)],
-#                    [nbinom.rvs(6, 0.3, size=100) for _ in range(30)]]
-#         dataset = np.array(dataset)
-#         result = tdp.log_likelihood_neg_binom(dataset, 
-#                                                 np.full(100, 5, dtype=float), 
-#                                                 0.7)
+        obs = np.array([nbinom.rvs(5, 0.7, size=100) for _ in range(30)])
+        obs = torch.tensor(obs).to(device)
 
-#         self.assertEqual(result.shape, (2,))
+        x = torch.full((201,), 5).to(device)
+        theta_y = torch.tensor([0.7]).to(device)
+
+        result = tdp.log_likelihood_neg_binom(x, obs, theta_y)
+
+        self.assertEqual(result.shape, ())
 
 
-#     def test_likelihood_with_different_dist(self):
-#         """Tests if the log-likelihood function can successfully give higher 
-#         probability to the means that actually generated data.
-#             Since this is based on sampling, it might give the wrong result 
-#         sometimes. However, increasing the number of samples should reduce the
-#         odds of this happening."
-#         """
+    def test_likelihood_shape_return_3_dim(self):
+        """Test to check if the likelihood returns an array of the appropriate
+        dimensions if the combination of the observations and the means 
+        produces a 3D array.
+        """
 
-#         theta = 0.3
-#         obs = np.array([nbinom.rvs(i * theta / (1-theta) , theta, 200) 
-#                 for i in range(1,31)]).T
-#         xs = np.repeat(np.arange(1, 15)[:, np.newaxis], 30, 1)[:, np.newaxis, :]
-#         xs = np.concatenate((xs, np.arange(1,31)[np.newaxis, np.newaxis]), 0)
+        obs = [[nbinom.rvs(5, 0.7, size=100) for _ in range(30)],
+                [nbinom.rvs(6, 0.3, size=100) for _ in range(30)]]
+        obs = torch.tensor(np.array(obs)).to(device)
+
+        x = torch.full((201,), 5).to(device)
+        theta_y = torch.tensor([0.7]).to(device)
+
+        result = tdp.log_likelihood_neg_binom(x, obs, theta_y)
+
+        self.assertEqual(result.shape, (2,))
+
+
+    def test_likelihood_with_different_dist(self):
+        """Tests if the log-likelihood function can successfully give higher 
+        probability to the means that actually generated data.
+            Since this is based on sampling, it might give the wrong result 
+        sometimes. However, increasing the number of samples should reduce the
+        odds of this happening."
+        """
+
+        theta_y = 0.3
+
+        obs = [nbinom.rvs(np.exp(i) * theta_y / (1-theta_y) , theta_y, 200) 
+                for i in range(1,31)]
+        obs = torch.tensor(np.array(obs).T, dtype=torch.float64).to(device)
         
-#         results = tdp.log_likelihood_neg_binom(obs, xs, theta)
-#         max_value_idx = np.argmax(results)
-#         self.assertEqual(max_value_idx, 14)
+        x = np.repeat(np.arange(1, 15)[:, np.newaxis], 30, 1)
+        x = np.hstack(( np.ones((14, 31)), x ))[:, None, :]
+        pre = np.hstack(( np.ones(31), np.arange(1,31)))
+        x = np.concatenate((x, pre[np.newaxis, np.newaxis, :]), 0)
+        x = torch.tensor(x, dtype=torch.float64).to(device)
+
+        theta_y = torch.tensor([theta_y], dtype=torch.float64).to(device)
+        
+        results = tdp.log_likelihood_neg_binom(x, obs, theta_y)
+        results = np.array(results.cpu())
+
+        max_value_idx = np.argmax(results)
+        self.assertEqual(max_value_idx, 14)
 
 
 
@@ -451,34 +467,34 @@ class TestConditionalDensities(unittest.TestCase):
         return -p_theta_y
 
 
-    # def test_approx_marg_post_of_theta(self):
-    #     """Tests the approximation of the marginal posterior of theta by 
-    #     checking that the function can successfully give higher probability to 
-    #     the parameter that is actually used in generating the data. 
-    #         Since this is based on sampling, it might give the wrong result 
-    #     sometimes. However, increasing the number of samples should reduce the
-    #     odds of this happening."""
+    def test_approx_marg_post_of_theta(self):
+        """Tests the approximation of the marginal posterior of theta by 
+        checking that the function can successfully give higher probability to 
+        the parameter that is actually used in generating the data. 
+            Since this is based on sampling, it might give the wrong result 
+        sometimes. However, increasing the number of samples should reduce the
+        odds of this happening."""
 
-    #     correct_result = (self.theta_y, self.theta_intercept, self.theta_PD,
-    #                         self.theta_PI)
+        correct_result = (self.theta_y, self.theta_intercept, self.theta_PD,
+                            self.theta_PI)
         
-    #     results = []
-    #     range_common=np.arange(2, 5)
-    #     y_range = np.arange(0.2, 0.7, 0.1)
+        results = []
+        range_common=np.arange(2, 5)
+        y_range = np.arange(0.2, 0.7, 0.1)
         
-    #     poss = []
-    #     poss_gen = product(y_range, range_common, range_common, range_common)
-    #     for curr_theta in poss_gen:
-    #         theta_y, *theta = curr_theta
-    #         curr_theta = (np.round(theta_y, 1), *theta)
+        poss = []
+        poss_gen = product(y_range, range_common, range_common, range_common)
+        for curr_theta in poss_gen:
+            theta_y, *theta = curr_theta
+            curr_theta = (np.round(theta_y, 1), *theta)
             
-    #         poss.append(curr_theta)            
-    #         res = self.neg_p_theta_given_y(curr_theta)
-    #         print(f"{curr_theta} -> {res[0]}")
-    #         results.append(-res[0])
+            poss.append(curr_theta)            
+            res = self.neg_p_theta_given_y(curr_theta)
+            print(f"{curr_theta} -> {res[0]}")
+            results.append(-res[0])
         
-    #     final_choice = np.argmax(results)
-    #     return self.assertTupleEqual(poss[final_choice], correct_result)
+        final_choice = np.argmax(results)
+        return self.assertTupleEqual(poss[final_choice], correct_result)
     
 
     # def test_lbfgs(self):
@@ -486,13 +502,13 @@ class TestConditionalDensities(unittest.TestCase):
     #     the density function."""
         
     #     result = tdp.lbfgs(p_theta_given_y=self.neg_p_theta_given_y, 
-    #                         init_guess=0.8,
-    #                         bounds=[(0.03, 0.97)],
+    #                         init_guess=np.ones(4),
+    #                         bounds=[(0.03, 0.97)] + [(0.01, None)] * 3,
     #                         n_hist_updates=30)
         
     #     print("Theta Approximated:")
-    #     print(result[0])
-    #     return self.assertAlmostEqual(result[0], self.theta, 1)
+    #     print(result)
+    #     # return self.assertAlmostEqual(result, self.theta, 1)
 
 
 ###############################################################################
