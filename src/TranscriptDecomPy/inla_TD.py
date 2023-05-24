@@ -1,11 +1,3 @@
-import os
-os.environ["CHOLMOD_USE_GPU"] = "1"
-
-from sksparse.cholmod import cholesky
-
-###############################################################################
-
-
 import numpy as np
 
 from functools import partial
@@ -21,6 +13,63 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
 from typing import Callable
+
+
+###############################################################################
+
+
+def general_determinant(A: torch.tensor, zero_dec: int) -> float:
+    """Calculates a general determinant that applies to singular matrices, i.e.,
+    matrices that are not of full-rank. The determinant here corresponds to the
+    product of all the nonzero eigenvalues of the matrix.
+
+        Here, we make use of the assumptions of A being a diagonal matrix, so
+    that we can use a banded solver as these are much faster than general sparse
+    solvers.
+
+    Args:
+        A (sparse.dia_matrix): real symmetric matrix.
+        zero (float): let e be an eigenvalue, if 0 <= e < zero, then e is
+            considered to be zero, otherwise e has its own value.
+
+
+    Returns:
+        log_det (float): logarithm of the general determinant of A.
+    
+    Requires:
+        A should only have nonzero values in the main diagonal and the first
+            offset diagonals of the matrix.
+        A.data should be ordered such that the main diagonal is the middle 
+            element of the array, and that the the top offset diagonal should be
+            the first element of the array.
+        zero >= 0
+        zero should be a very small number.
+    """
+
+    evs = torch.linalg.eigvalsh(A)
+    non_zero_evs = evs[torch.round(evs, decimals=zero_dec) != 0]
+    log_det = torch.sum(torch.log(non_zero_evs))
+
+    return log_det
+
+
+def gen_tensor(value: float or list, shape: int=None) -> torch.tensor:
+    """Creates a float64 tensor on the GPU.
+
+    Args:
+        value (float or list): value which we want to convert one instance or 
+            multiple instance of into a tensor.
+        shape (int, optional): in case the value is a single float that we would
+            like to repeat to form a 1-D vector, additionally to the value, the
+            length of the tensor should also be provided. Defaults to None.
+
+    Returns:
+        torch.tensor: tensor created.
+    """
+
+    if shape:
+        return torch.full((shape,), value, dtype=torch.float64, device=device)
+    return torch.tensor(value, dtype=torch.float64, device=device)
 
 
 ###############################################################################
@@ -67,9 +116,9 @@ def log_likelihood_neg_binom(x: torch.tensor, obs: torch.tensor,
     return pm_for_single_obs
 
 
-def build_gmrf_precision_mat(n_dim: int, theta_intercept: float, 
+def build_gmrf_precision_mat(n_dim: int, theta_intercept: float,
                                 theta_PD: float,
-                                theta_PI: float) -> sparse.csc_matrix:
+                                theta_PI: float) -> torch.tensor:
     """Constructs a precision matrix (2 * n_dim + 1) x (2 * n_dim + 1) which 
     models a gmrf x where:
         intercept ~ N(0, 1/theta_intercept)
@@ -92,63 +141,66 @@ def build_gmrf_precision_mat(n_dim: int, theta_intercept: float,
             fixed effects component of the model.
 
     Returns:
-        sparse.csc_matrix: precision matrix.
+        torch.tensor: precision matrix.
     """
 
     Q_11 = [ theta_intercept + n_dim * theta_PI ]
     k_v_1T = np.full(n_dim, theta_PI)
     k_v_1 = k_v_1T[:, np.newaxis]
-    k_v_I = sparse.diags(np.full(n_dim, theta_PI), format='csr')
+    k_v_I = sparse.diags(np.full(n_dim, theta_PI), format='csr').todense()
 
-    R = sparse.diags(np.full(n_dim, theta_PD*2))
+    R_diag = np.hstack((theta_PD, np.full(n_dim -2, theta_PD*2), theta_PD))
+    R = sparse.diags(R_diag)
     R.setdiag(-theta_PD, k=-1)
     R.setdiag(-theta_PD, k=1)
-    R = sparse.csr_matrix(R)
+    R = sparse.csr_matrix(R).todense() + 0.05
 
-    fst_block_row = sparse.hstack((Q_11,  k_v_1T    , -k_v_1T), format='csc')
-    snd_block_row = sparse.hstack((k_v_1 , R + k_v_I, -k_v_I ), format='csc')
-    trd_block_row = sparse.hstack((-k_v_1, -k_v_I   ,  k_v_I ), format='csc')
+    fst_block_row = np.hstack((Q_11,  k_v_1T    , -k_v_1T))
+    snd_block_row = np.hstack((k_v_1 , R + k_v_I, -k_v_I ))
+    trd_block_row = np.hstack((-k_v_1, -k_v_I   ,  k_v_I ))
 
-    return sparse.vstack((fst_block_row, snd_block_row, trd_block_row), 
-                            format='csc')
+    Q = np.vstack((fst_block_row, snd_block_row, trd_block_row))
+    
+    return gen_tensor(Q)
 
 
-
-def gmrf_density(x: np.ndarray, det: float, Q: sparse.csc_matrix) -> float:
-    """Calculates the density of a value using the probability density function
-    of a multivariate normal distribution.
+def gmrf_density(x: torch.tensor, log_det: float, Q: torch.tensor) -> float:
+    """Calculates the log density of a value using the probability density
+    function of a multivariate normal distribution.
 
     Args:
-        x (np.ndarray): point used to calculate the density.
-        det (float): determinant of the precision matrix of the multivariate
+        x (torch.tensor): point used to calculate the density.
+        log_det (float): determinant of the precision matrix of the multivariate
             normal distribution used.
-        Q (sparse.csc_matrix): precision matrix of the multivariate normal 
+        Q (torch.tensor): precision matrix of the multivariate normal 
             distribution used.
 
     Returns:
-        density (float): density of the point given in the distribution given.
+        density (float): log density of the point given in the distribution
+            given.
     """
     
     n = x.shape[0]
-    exp_value = -0.5 * (x @ Q @ x[:, np.newaxis])
-    density = ((2 * np.pi)**(-n/2)) * np.sqrt(det) * np.exp(exp_value)
-    return density
+    exp_value = -0.5 * torch.mm(x[None, :], torch.mm(Q, x[:, None]))[0]
+    double_pi = gen_tensor(2 * np.pi)
+    log_density = ( -n * torch.log(double_pi) + log_det ) / 2 + exp_value
+    return log_density
 
 
-def create_gmrf_density_func(Q: sparse.csc_matrix) -> Callable:
+def create_gmrf_density_func(Q: torch.tensor) -> Callable:
     """Generates a function that calculates the density of the GMRF assuming the
     the precision matrix given.
 
     Args:
-        Q (sparse.csc_matrix): precision matrix of the GMRF.
+        Q (torch.tensor): precision matrix of the GMRF.
 
     Returns:
         Callable: function that calculates the density of the GMRF.
     """
     
-    det = np.exp(cholesky(Q).logdet())
+    log_det = general_determinant(Q, 5)
 
-    return partial(gmrf_density, det=det, Q=Q)
+    return partial(gmrf_density, log_det=log_det, Q=Q)
 
 
 ###############################################################################
@@ -162,7 +214,7 @@ def expand_increment_axis(n_feat: int, h: float) -> torch.tensor:
         h (float): increment value.
 
     Returns:
-        np.ndarray: multi-dimensional array that contains the individual 
+        torch.tensor: multi-dimensional array that contains the individual 
             increments at each feature without altering the other features.
 
     Ensures:
@@ -174,26 +226,26 @@ def expand_increment_axis(n_feat: int, h: float) -> torch.tensor:
             increment.
     """
 
-    return (h * torch.eye(n_feat, dtype=torch.float64)[:, None, :]).to(device)
+    return h * torch.eye(n_feat, dtype=torch.float64, device=device)[:, None, :]
 
 
-def fst_order_central_differences(objective: Callable, x: np.ndarray,
-                                    increment: np.ndarray, 
-                                    h: float) -> np.ndarray:
+def fst_order_central_differences(objective: Callable, x: torch.tensor,
+                                    increment: torch.tensor, 
+                                    h: float) -> torch.tensor:
     """Approximates the first derivative of a function using finite differences,
     in particular using first order central differences.
 
     Args:
         objective (Callable): function whose derivative we want to approximate.
-        x (np.ndarray): value around which we want the approximation to the 
+        x (torch.tensor): value around which we want the approximation to the 
             derivative.
-        increment (np.ndarray): 3-dimensional array containing the vectors that
-            increment each feature of x individually based on h.
+        increment (torch.tensor): 3-dimensional array containing the vectors 
+            that increment each feature of x individually based on h.
         h (float): step of the approximation. Ideally, it should be as close to
             zero as possible.
 
     Returns:
-        np.ndarray: approximate derivative value at the x point. The shape of 
+        torch.tensor: approximate derivative value at the x point. The shape of 
             the returned array depends on the objective function.
 
     Requires:
@@ -210,7 +262,7 @@ def fst_order_central_differences(objective: Callable, x: np.ndarray,
 
 def snd_order_central_differences(objective: Callable, x: torch.tensor,
                                     increment: torch.tensor, 
-                                    h: float) -> float:
+                                    h: float) -> torch.tensor:
     """Approximates the second derivative of a function using finite 
     differences, in particular using second order central differences. This 
     function considers only derivatives where the objective function is twice
@@ -226,7 +278,7 @@ def snd_order_central_differences(objective: Callable, x: torch.tensor,
             zero as possible.
 
     Returns:
-        np.ndarray: approximate derivative value at the x point. The shape of 
+        torch.tensor: approximate derivative value at the x point. The shape of 
             the returned array depends on the objective function.
 
     Requires:
@@ -277,7 +329,7 @@ def newton_raphson_method(objective: Callable,
                             h: float, 
                             threshold: float, 
                             max_iter: int, 
-                            init_v: np.ndarray) -> tuple:
+                            init_v: torch.tensor) -> tuple:
     """Calculates the Gaussian approximation to the full conditional of the 
     GMRF, p(x|y,theta), using a second-order Taylor expansion.
 
@@ -309,7 +361,7 @@ def newton_raphson_method(objective: Callable,
             specified in the arguments.
 
     Returns:
-        new_x (np.ndarray): mean of the Gaussian approximation to the full 
+        new_x (torch.tensor): mean of the Gaussian approximation to the full 
             conditional of the GMRF.
         matrix_A (float): determinant of the precision matrix of the 
             Gaussian approximation to the full conditional of the GMRF.
@@ -318,65 +370,39 @@ def newton_raphson_method(objective: Callable,
     current_x = init_v
     for _ in range(max_iter):
         b, c = approx_taylor_expansion(objective, current_x, h)
-        b = b.to('cpu')
-        c = np.array(c.to('cpu'))
+        
+        if torch.sum(torch.abs(b) < 1e-4) >= b.shape[0]*0.95:
+            return (current_x, general_determinant(matrix_A, 5))
+        
+        n_feat = c.shape[0]
+        c = torch.sparse.spdiags(c.cpu(), torch.tensor([0]), (n_feat, n_feat))
 
         ## Calculates the mean solving an equation of the type: 
         ##    matrix_A @ x = b
-        matrix_A = Q + sparse.diags(c, format='csc')
-        chol_factor = cholesky(matrix_A)
-        new_x = torch.tensor(chol_factor(b), dtype=torch.float64).to(device)
-
-        if linalg.norm(b) < threshold:
-            return (new_x, np.exp(chol_factor.logdet()))
+        matrix_A = Q + c.to_dense().to(device)
+        LU, pivots = torch.linalg.lu_factor(matrix_A)
+        new_x = torch.linalg.lu_solve(LU, pivots, b[:, None])
+        new_x = torch.transpose(new_x, 0, 1)[0]
+        new_x = torch.where(new_x > 300, 300, new_x)
+        new_x = torch.where(new_x < -300, -300, new_x)
         
+        if torch.norm(new_x - current_x) < threshold:
+            return (new_x, general_determinant(matrix_A, 5))
         current_x = new_x
     
-    return (new_x, np.exp(chol_factor.logdet()))
+    return (new_x, general_determinant(matrix_A, 5))
 
 
 
 ###############################################################################
 # calculating p(theta | y)
 
-def general_determinant(A: sparse.dia_matrix, zero: float=1e-5) -> float:
-    """Calculates a general determinant that applies to singular matrices, i.e.,
-    matrices that are not of full-rank. The determinant here corresponds to the
-    product of all the nonzero eigenvalues of the matrix.
-
-        Here, we make use of the assumptions of A being a diagonal matrix, so
-    that we can use a banded solver as these are much faster than general sparse
-    solvers.
-
-    Args:
-        A (sparse.dia_matrix): real symmetric matrix.
-        zero (float): let e be an eigenvalue, if 0 <= e < zero, then e is
-            considered to be zero, otherwise e has its own value.
-
-
-    Returns:
-        float: general determinant of A.
-    
-    Requires:
-        A should only have nonzero values in the main diagonal and the first
-            offset diagonals of the matrix.
-        A.data should be ordered such that the main diagonal is the middle 
-            element of the array, and that the the top offset diagonal should be
-            the first element of the array.
-        zero >= 0
-        zero should be a very small number.
-    """
-
-    eigvs = linalg.eigvals_banded(A.data[:2])
-    return np.prod(eigvs[eigvs > zero])
-
-
 def approx_marg_post_of_theta(data_likelihood: Callable,
                                 theta: np.ndarray,
                                 gmrf_likelihood: Callable,
                                 theta_dist: Callable,
-                                gaus_approx_mean: np.ndarray,
-                                gaus_approx_det: float) -> float:
+                                gaus_approx_mean: torch.tensor,
+                                gaus_approx_ldet: float) -> float:
     """Approximates the marginal posterior of theta, p(theta|y).
 
     Args:
@@ -387,9 +413,9 @@ def approx_marg_post_of_theta(data_likelihood: Callable,
             GMRF (that corresponds to a Multivariate Normal Distribution)
         theta_dist (Callable): probability density function of the distribution
             of theta
-        gaus_approx_mean (np.ndarray): mean of the Gaussian approximation to the
-            full conditional of the GMRF.
-        gaus_approx_det (float): determinant of the precision matrix of the 
+        gaus_approx_mean (torch.tensor): mean of the Gaussian approximation to
+            the full conditional of the GMRF.
+        gaus_approx_ldet (float): determinant of the precision matrix of the 
             Gaussian approximation to the full conditional of the GMRF.
 
     Returns:
@@ -401,17 +427,16 @@ def approx_marg_post_of_theta(data_likelihood: Callable,
     dim = x.shape[0]
 
     # ln p(y|x, theta)
-    likelihood = data_likelihood(x).cpu()
+    likelihood = data_likelihood(x)
 
     # ln p(x|theta)
-    gmrf_prior = np.log(gmrf_likelihood(np.array(x.cpu())))
+    gmrf_prior = gmrf_likelihood(x)
     
     # ln p(theta)
-    theta_prior = np.log(theta_dist(theta))
+    theta_prior = gen_tensor(np.log(theta_dist(theta)))
 
     # ln p_G(x|y, theta)
-    ga_full_conditional_x = np.sqrt(gaus_approx_det * ((2*np.pi)**(-dim)))
-    ga_full_conditional_x = np.log(ga_full_conditional_x)
+    ga_full_conditional_x = (gaus_approx_ldet - dim * np.log(2*np.pi)) / 2
 
     # ln p(theta | y)
     return likelihood + gmrf_prior + theta_prior - ga_full_conditional_x
