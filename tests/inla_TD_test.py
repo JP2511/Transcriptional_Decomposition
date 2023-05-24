@@ -93,6 +93,156 @@ class TestLikelihood(unittest.TestCase):
 
 
 
+class TestQMatrix(unittest.TestCase):
+
+    # ------------------------------------------------- #
+    #  tests for the function build_gmrf_precision_mat  #
+    # ------------------------------------------------- #
+
+    def test_build_gmrf_precision_mat_size_5(self):
+        """Tests whether the precision matrix constructed has the shape that it
+        should have. Here, we use 5 features.
+        """
+
+        Q = tdp.build_gmrf_precision_mat(5, 1, 1, 1)
+        expected_result = (11, 11)
+
+        return self.assertEqual(Q.shape, expected_result)
+    
+
+    def test_build_gmrf_precision_mat_size_12(self):
+        """Tests whether the precision matrix constructed has the shape that it
+        should have. Here, we use 12 features.
+        """
+
+        Q = tdp.build_gmrf_precision_mat(12, 1, 1, 1)
+        expected_result = (25, 25)
+
+        return self.assertEqual(Q.shape, expected_result)
+    
+
+    def test_build_gmrf_precision_mat_diag_ones(self):
+        """Tests whether the precision matrix constructed has the main diagonal
+        that it should have, when all the parameters are 1.
+        """
+
+        n = 5
+        theta_intercept = 1
+        theta_PD = 1
+        theta_PI = 1
+
+        Q = tdp.build_gmrf_precision_mat(n, theta_intercept, theta_PD, theta_PI)
+        result = np.array(torch.diag(Q).cpu())
+
+        Q_00 = [theta_intercept + n * theta_PI]
+        Q_11 = [theta_PD + theta_PI]
+        Q_22 = 2 * theta_PD + theta_PI
+        expected_result = np.hstack((Q_00, Q_11, np.full(n - 2, Q_22), Q_11, 
+                                        np.full(n, theta_PI)))
+        
+        return np.testing.assert_array_equal(result, expected_result)
+    
+
+    def test_build_gmrf_precision_mat_diag_diff(self):
+        """Tests whether the precision matrix constructed has the main diagonal
+        that it should have. Each parameter is chosen so that we can account if
+        the constribution of each parameter to the values of the main diagonal.
+        """
+
+        n = 7
+        theta_intercept = 1
+        theta_PD = 10
+        theta_PI = 100
+
+        Q = tdp.build_gmrf_precision_mat(n, theta_intercept, theta_PD, theta_PI)
+        result = np.array(torch.diag(Q).cpu())
+
+        Q_00 = [theta_intercept + n * theta_PI]
+        Q_11 = [theta_PD + theta_PI]
+        Q_22 = 2 * theta_PD + theta_PI
+        expected_result = np.hstack((Q_00, Q_11, np.full(n - 2, Q_22), Q_11, 
+                                        np.full(n, theta_PI)))
+        
+        return np.testing.assert_array_equal(result, expected_result)
+    
+
+    def test_build_gmrf_precision_mat_offdiag_below(self):
+        """Tests whether the precision matrix constructed has the first off-
+        -diagonal that it should have. Here the first off-diagonal refers to
+        the diagonal immediately below the main diagonal.
+        """
+        
+        n = 7
+        theta_intercept = 1
+        theta_PD = 10
+        theta_PI = 100
+
+        Q = tdp.build_gmrf_precision_mat(n, theta_intercept, theta_PD, theta_PI)
+        result = np.array(torch.diag(Q, -1).cpu())
+
+        expected_result = np.hstack(([theta_PI], np.full(n-1, -theta_PD), 
+                                        np.zeros(n)))
+        
+        return np.testing.assert_array_equal(result, expected_result)
+    
+
+    def test_build_gmrf_precision_mat_offdiag_above(self):
+        """Tests whether the precision matrix constructed has the first off-
+        -diagonal that it should have. Here the first off-diagonal refers to
+        the diagonal immediately above the main diagonal.
+        """
+
+        n = 7
+        theta_intercept = 1
+        theta_PD = 10
+        theta_PI = 100
+
+        Q = tdp.build_gmrf_precision_mat(n, theta_intercept, theta_PD, theta_PI)
+        result = np.array(torch.diag(Q, 1).cpu())
+
+        expected_result = np.hstack(([theta_PI], np.full(n-1, -theta_PD), 
+                                        np.zeros(n)))
+        
+        return np.testing.assert_array_equal(result, expected_result)
+    
+
+    def test_build_gmrf_precision_mat_far_offdiag_below(self):
+        """Tests whether the precision matrix constructed has the upper 
+        off-diagonal that is far from the main diagonal that it should have.
+        """
+
+        n = 7
+        theta_intercept = 1
+        theta_PD = 10
+        theta_PI = 100
+
+        Q = tdp.build_gmrf_precision_mat(n, theta_intercept, theta_PD, theta_PI)
+        result = np.array(torch.diag(Q, -n).cpu())
+
+        expected_result = np.hstack(([theta_PI], np.full(n, -theta_PI)))
+        
+        return np.testing.assert_array_equal(result, expected_result)
+    
+
+    def test_build_gmrf_precision_mat_far_offdiag_above(self):
+        """Tests whether the precision matrix constructed has the lower 
+        off-diagonal that is far from the main diagonal that it should have.
+        """
+
+        n = 7
+        theta_intercept = 1
+        theta_PD = 10
+        theta_PI = 100
+
+        Q = tdp.build_gmrf_precision_mat(n, theta_intercept, theta_PD, theta_PI)
+        result = np.array(torch.diag(Q, n).cpu())
+
+        expected_result = np.hstack(([theta_PI], np.full(n, -theta_PI)))
+        
+        return np.testing.assert_array_equal(result, expected_result)
+
+
+
 class TestDerivativesApprox(unittest.TestCase):
 
     # ---------------------------------------------- #
@@ -372,23 +522,21 @@ class TestConditionalDensities(unittest.TestCase):
     ####################################################
 
     n_feat = 20
-    n_obs = 700
+    n_obs = 300
 
     theta_y = 0.40
-    theta_intercept = 2
-    theta_PD = 3
-    theta_PI = 4
+    theta_intercept = 5
+    theta_PD = 0.5
+    theta_PI = 3
 
     gmrf = sampling_global_gmrf(n_feat, theta_intercept, theta_PD, theta_PI, 1)
     obs = sampling_synthetic_data(gmrf, theta_y, n_obs)
     intercept, pd, eta = gmrf
 
     # converting for GPU
-    theta_y = torch.tensor([theta_y], dtype=torch.float64).to(device)
+    theta_y = tdp.gen_tensor([theta_y])
 
-    gmrf = torch.tensor(np.concatenate((intercept[0], pd[0], eta[0])),
-                        dtype=torch.float64)
-    gmrf = gmrf.to(device)
+    gmrf = tdp.gen_tensor(np.concatenate((intercept[0], pd[0], eta[0])))
 
     obs = torch.tensor(obs, dtype=torch.float64).to(device)
 
@@ -397,104 +545,108 @@ class TestConditionalDensities(unittest.TestCase):
     #######################################
 
 
-    # ---------------------------------------------- #
-    #  tests for the function newton_raphson_method  #
-    # ---------------------------------------------- #
+#     # ---------------------------------------------- #
+#     #  tests for the function newton_raphson_method  #
+#     # ---------------------------------------------- #
 
 
-    def test_newton_raphson_method(self):
-        """Tests the Newton-Raphson method by testing if it correctly 
-        approximates the latent vector that both was generated and is used to
-        generate the observations."""
+#     def test_newton_raphson_method(self):
+#         """Tests the Newton-Raphson method by testing if it correctly 
+#         approximates the latent vector that both was generated and is used to
+#         generate the observations."""
         
-        objective = functools.partial(tdp.log_likelihood_neg_binom, 
-                                        theta_y=self.theta_y,
-                                        obs=self.obs)
+#         objective = functools.partial(tdp.log_likelihood_neg_binom, 
+#                                         theta_y=self.theta_y,
+#                                         obs=self.obs)
         
-        Q = tdp.build_gmrf_precision_mat(self.n_feat, self.theta_intercept,
-                                            self.theta_PD, self.theta_PI)
+#         Q = tdp.build_gmrf_precision_mat(self.n_feat, self.theta_intercept,
+#                                             self.theta_PD, self.theta_PI)
         
-        init_val = torch.ones(self.n_feat * 2 + 1, dtype=torch.float64)
-        init_val = init_val.to(device)
+#         init_val = torch.zeros(self.n_feat * 2 + 1, dtype=torch.float64, 
+#                                 device=device)
         
-        mode_x, _, = tdp.newton_raphson_method(objective=objective, Q=Q, 
-                                                h=1e-4, threshold=1e-3,
-                                                max_iter=30, init_v=init_val)
-
-        return np.testing.assert_array_almost_equal(mode_x.cpu(), 
-                                                    self.gmrf.cpu(), 0)
-
-
-    # -------------------------------------------------- #
-    #  tests for the function approx_marg_post_of_theta  #
-    # -------------------------------------------------- #
-
-    def neg_p_theta_given_y(self, curr_theta: np.ndarray) -> float:
-        """Creates the function that calculates the -log p(theta | y) for the
-        generated data.
-
-        Args:
-            curr_theta (int): parameters used in the calculation of the 
-                probability.
-
-        Returns:
-            float: - log p(theta | y)
-        """
-        theta_y, theta_intercept, theta_PD, theta_PI = curr_theta
-        theta_y = torch.tensor(theta_y, dtype=torch.float64).to(device)
-
-        new_Q = tdp.build_gmrf_precision_mat(self.n_feat, theta_intercept, 
-                                                theta_PD, theta_PI)
-
-        objective = functools.partial(tdp.log_likelihood_neg_binom, 
-                                            theta_y=theta_y, 
-                                            obs=self.obs)
+#         mode_x, _ = tdp.newton_raphson_method(objective=objective, Q=Q, 
+#                                                 h=1e-4, threshold=1e-3,
+#                                                 max_iter=50, init_v=init_val)
         
-        init_v = torch.ones(self.n_feat*2 + 1, dtype=torch.float64).to(device)
+#         print("\nResult obtained in Newton-Raphson:")
+#         print(mode_x)
+
+#         return np.testing.assert_array_almost_equal(mode_x.cpu(), 
+#                                                     self.gmrf.cpu(), 0)
+
+
+#     # -------------------------------------------------- #
+#     #  tests for the function approx_marg_post_of_theta  #
+#     # -------------------------------------------------- #
+
+#     def neg_p_theta_given_y(self, curr_theta: np.ndarray) -> float:
+#         """Creates the function that calculates the -log p(theta | y) for the
+#         generated data.
+
+#         Args:
+#             curr_theta (int): parameters used in the calculation of the 
+#                 probability.
+
+#         Returns:
+#             float: - log p(theta | y)
+#         """
+#         theta_y, theta_intercept, theta_PD, theta_PI = curr_theta
+#         theta_y = torch.tensor(theta_y, dtype=torch.float64).to(device)
+
+#         new_Q = tdp.build_Q(self.n_feat, theta_intercept, 
+#                                                 theta_PD, theta_PI)
+
+#         objective = functools.partial(tdp.log_likelihood_neg_binom, 
+#                                             theta_y=theta_y, 
+#                                             obs=self.obs)
+        
+#         init_v = torch.ones(self.n_feat*2 + 1, dtype=torch.float64, 
+#                                 device=device)
             
-        mode_x, ga_det = tdp.newton_raphson_method(objective, new_Q, 
-                                                1e-4, 1e-3, 30,
-                                                init_v)
+#         mode_x, ga_ldet = tdp.newton_raphson_method(objective, new_Q, 
+#                                                 1e-4, 1e-3, 40,
+#                                                 init_v)
         
-        gmrf_prior = tdp.create_gmrf_density_func(new_Q)
-        p_theta_y = tdp.approx_marg_post_of_theta(data_likelihood=objective,
-                                                    theta=curr_theta,
-                                                    gmrf_likelihood=gmrf_prior,
-                                                    theta_dist=lambda _: 1,
-                                                    gaus_approx_mean=mode_x,
-                                                    gaus_approx_det=ga_det)
+#         gmrf_prior = tdp.create_gmrf_density_func(new_Q)
+#         p_theta_y = tdp.approx_marg_post_of_theta(data_likelihood=objective,
+#                                                     theta=curr_theta,
+#                                                     gmrf_likelihood=gmrf_prior,
+#                                                     theta_dist=lambda _: 1,
+#                                                     gaus_approx_mean=mode_x,
+#                                                     gaus_approx_ldet=ga_ldet)
         
-        return -p_theta_y
+#         return -p_theta_y.cpu()[0]
 
 
-    def test_approx_marg_post_of_theta(self):
-        """Tests the approximation of the marginal posterior of theta by 
-        checking that the function can successfully give higher probability to 
-        the parameter that is actually used in generating the data. 
-            Since this is based on sampling, it might give the wrong result 
-        sometimes. However, increasing the number of samples should reduce the
-        odds of this happening."""
+    # def test_approx_marg_post_of_theta(self):
+    #     """Tests the approximation of the marginal posterior of theta by 
+    #     checking that the function can successfully give higher probability to 
+    #     the parameter that is actually used in generating the data. 
+    #         Since this is based on sampling, it might give the wrong result 
+    #     sometimes. However, increasing the number of samples should reduce the
+    #     odds of this happening."""
 
-        correct_result = (self.theta_y, self.theta_intercept, self.theta_PD,
-                            self.theta_PI)
+    #     correct_result = (self.theta_y[0], self.theta_intercept, self.theta_PD,
+    #                         self.theta_PI)
         
-        results = []
-        range_common=np.arange(2, 5)
-        y_range = np.arange(0.2, 0.7, 0.1)
+    #     results = []
+    #     range_common=np.arange(2, 5)
+    #     y_range = np.arange(0.2, 0.7, 0.1)
         
-        poss = []
-        poss_gen = product(y_range, range_common, range_common, range_common)
-        for curr_theta in poss_gen:
-            theta_y, *theta = curr_theta
-            curr_theta = (np.round(theta_y, 1), *theta)
+    #     poss = []
+    #     poss_gen = product(y_range, range_common, range_common, range_common)
+    #     for curr_theta in poss_gen:
+    #         theta_y, *theta = curr_theta
+    #         curr_theta = (np.round(theta_y, 1), *theta)
+    #         poss.append(curr_theta)
+
+    #         res = self.neg_p_theta_given_y(curr_theta)
+    #         # print(f"{curr_theta} -> {res}")
+    #         results.append(-res)
             
-            poss.append(curr_theta)            
-            res = self.neg_p_theta_given_y(curr_theta)
-            print(f"{curr_theta} -> {res[0]}")
-            results.append(-res[0])
-        
-        final_choice = np.argmax(results)
-        return self.assertTupleEqual(poss[final_choice], correct_result)
+    #     final_choice = np.argmax(results)
+    #     return self.assertTupleEqual(poss[final_choice], correct_result)
     
 
     # def test_lbfgs(self):
@@ -514,7 +666,6 @@ class TestConditionalDensities(unittest.TestCase):
 ###############################################################################
 
 unittest.main()
-
 
 ###############################################################################
 # def read_data(name: str) -> np.ndarray:

@@ -153,7 +153,7 @@ def build_gmrf_precision_mat(n_dim: int, theta_intercept: float,
     R = sparse.diags(R_diag)
     R.setdiag(-theta_PD, k=-1)
     R.setdiag(-theta_PD, k=1)
-    R = sparse.csr_matrix(R).todense() + 0.05
+    R = sparse.csr_matrix(R).todense()
 
     fst_block_row = np.hstack((Q_11,  k_v_1T    , -k_v_1T))
     snd_block_row = np.hstack((k_v_1 , R + k_v_I, -k_v_I ))
