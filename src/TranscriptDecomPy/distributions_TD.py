@@ -284,11 +284,11 @@ def build_gmrf_Q(n_feat: int, theta_intercept: torch.tensor,
     """
     
     Q_11 = (theta_intercept + n_feat*theta_PI)[None]
-    theta_PI_1_T = inla_TD.gen_tensor(theta_PI, n_feat)
+    theta_PI_1_T = theta_PI[None].repeat((n_feat,))
     theta_PI_1 = theta_PI_1_T[:, None]
 
     Q_PD = theta_PD * creating_RW1_Q(n_feat)
-    Q_PI = torch.diag(inla_TD.gen_tensor(theta_PI, n_feat))
+    Q_PI = torch.diag(theta_PI_1_T)
 
     fst_row = torch.hstack(( Q_11      ,  theta_PI_1_T, -theta_PI_1_T))
     snd_row = torch.hstack(( theta_PI_1,   Q_PD + Q_PI, -Q_PI        ))
@@ -346,7 +346,7 @@ def sample_random_effects(n_feat: int, theta_PI: torch.tensor,
     """
     
     mean = inla_TD.gen_tensor(0, n_feat)
-    Q = torch.diag(inla_TD.gen_tensor(theta_PI, n_feat))
+    Q = torch.diag(theta_PI.repeat(n_feat,))
     
     return MultivariateNormal(mean, precision_matrix=Q).rsample((n_samples,)) 
 
@@ -414,7 +414,6 @@ def sample_IGMRF(Q: torch.tensor, theta_PD: torch.tensor,
     
     eigVal, eigVec = torch.linalg.eigh(Q)
     eigVal, eigVec = eigVal[1:], eigVec[:, 1:]
-    eigVal = eigVal
 
     cov = torch.diag(1/(eigVal * theta_PD))
     mean = inla_TD.gen_tensor(0, eigVal.shape[0])
