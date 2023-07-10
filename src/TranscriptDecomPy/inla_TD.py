@@ -5,11 +5,19 @@ import numpy as np
 
 from typing import Callable
 from functools import partial
+from itertools import product
+from scipy.optimize import root
+from torch.distributions.normal import Normal
+
+###############################################################################
+# set up
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-###############################################################################
+torch.autograd.set_detect_anomaly(True)
 
+###############################################################################
+# utils
 
 def general_determinant(A: torch.tensor, zero_dec: int) -> float:
     """Calculates a general determinant that applies to singular matrices, i.e.,
@@ -66,7 +74,7 @@ def gen_tensor(value: float or list, shape: int=None) -> torch.tensor:
 
 
 ###############################################################################
-
+# GMRF pdf
 
 def gmrf_density(x: torch.tensor, log_det: float, Q: torch.tensor) -> float:
     """Calculates the log density of a value using the probability density
@@ -247,11 +255,11 @@ def approx_marg_post_of_theta(data_likelihood: Callable,
     gmrf_prior = gmrf_likelihood(x)
     
     # ln p(theta)
-    theta_prior = gen_tensor(np.log(theta_dist(theta)))
+    theta_prior = theta_dist(theta)
 
     # ln p_G(x|y, theta)
-    det = 2*torch.sum(torch.log(torch.diag(gaus_approx_L)))
-    ga_full_conditional_x = (det - dim * np.log(2*np.pi)) / 2
+    det = torch.sum(torch.log(torch.diag(gaus_approx_L)))
+    ga_full_conditional_x = det - (dim/2) * np.log(2*np.pi)
 
     # ln p(theta | y)
     return likelihood + gmrf_prior + theta_prior - ga_full_conditional_x
@@ -260,7 +268,6 @@ def approx_marg_post_of_theta(data_likelihood: Callable,
 
 ###############################################################################
 # exploring p(theta | y)
-
 
 def calc_mode_of_marg_post_theta(p_theta_given_y: Callable, 
                                     bounding_func: Callable,
@@ -292,9 +299,212 @@ def calc_mode_of_marg_post_theta(p_theta_given_y: Callable,
 
     def calc_bounded_theta_posterior(theta: torch.tensor) -> torch.tensor:
         bounded_theta = bounding_func(theta)
-        return p_theta_given_y(bounded_theta)
+        return p_theta_given_y(bounded_theta)[-1]
 
     result = torchmin.minimize(calc_bounded_theta_posterior, init_guess, 
                                 method='l-bfgs').x
     
     return bounding_func(result)
+
+
+def gen_f_theta_explorer(neg_ln_p_theta_given_y: Callable,
+                            bounding_func: Callable,
+                            init_guess: torch.tensor) -> Callable:
+    """Creates a function that allows for the reparameterized exploration of
+    theta values.
+
+    Args:
+        neg_ln_p_theta_given_y (Callable): function that given a vector of
+            thetas returns the posterior marginal of theta.
+        bounding_func (Callable): function that constraints the inputs fed to
+            the posterior marginal of theta that were given by the minimizer.
+        init_guess (torch.tensor): initial guess for the values of theta (the
+            parameters).
+
+    Raises:
+        Exception: in the explorer function returned, if the vector given makes
+            one of the thetas become negative, it stops the execution as it will
+            not run either way.
+    
+    Returns:
+        explorer (Callable): function that allows the reparameterized exporation
+            of the posterior marginal of theta.
+    """
+    
+    mode = calc_mode_of_marg_post_theta(neg_ln_p_theta_given_y, bounding_func,
+                                        init_guess)
+    print(f"\nShowing mode found: {mode}")
+    
+    correct_neg_post_marg_theta = lambda x: neg_ln_p_theta_given_y(x)[-1]
+    theta_Hess = torch.autograd.functional.hessian(correct_neg_post_marg_theta, 
+                                                    mode)
+    eigVals, eigVec = torch.linalg.eigh(theta_Hess)
+    Lmbda = torch.diag(1/torch.sqrt(eigVals))
+
+    def explorer(z: torch.tensor) -> tuple:
+        theta = mode[:, None] + eigVec @ Lmbda @ z[:, None]
+        theta = theta.T[0]
+        if torch.any(theta < 0):
+            raise Exception("Failed becaused one of the thetas in the " +
+                            "explorer has a negative value. Consider using a" +
+                            "smaller step")
+        
+        ga_mode, ga_L, neg_p_theta = neg_ln_p_theta_given_y(theta)
+        vars = torch.diag(torch.cholesky_inverse(ga_L))
+        return torch.hstack((z, theta, ga_mode, vars, -neg_p_theta))
+    
+    return explorer
+
+
+def obtain_theta_axis_points(explorer: Callable, 
+                                theta_dim: int,
+                                step: float,
+                                stop: float) -> torch.tensor:
+    """Performs the initial exploration of the posterior marginal theta along
+    the axis (in both directions) of the reparameterization
+
+    Args:
+        explorer (Callable): function that allows the reparameterized exporation
+            of the posterior marginal of theta.
+        theta_dim (int): number of thetas used/that are going to be explored.
+        step (float): distance between the thetas fed to the explorer.
+        stop (float): threshold to stop the exploration of the thetas in the
+            current direction.
+
+    Returns:
+        points (torch.tensor): the points explored.
+    
+    Requires:
+        points should have the following structure:
+            -each row corresponds to a single point
+            -the first `theta_dim` columns should be the parameterized \\thetas
+            -the second `theta_dim`columns should be the \\thetas in the
+            original space
+            -the next `n_feat` columns should be the mode of the Gaussian
+            approximation for p_G(x | y, \\theta)
+            -the next `n_feat` columns should be the variance of the Gaussian
+            approximation for p_G(x | y, \\theta)
+            -the last column correspond to p(\\theta | y).
+    """
+    
+    init_z = gen_tensor(0, theta_dim)
+    theta_0_results = explorer(init_z)
+    p_theta_0 = theta_0_results[-1]
+    print(f"\n Initial probability is {p_theta_0}")
+    print(f"With original theta {theta_0_results[theta_dim:2*theta_dim]}")
+    points = theta_0_results
+    for i in torch.arange(theta_dim):
+        for direction in (1, -1):
+            iteration = 1
+            while True:
+                pos = torch.eye(theta_dim, device=device, 
+                                dtype=torch.float64)[i] 
+                pos = step * iteration * pos * direction
+                new_point = explorer(pos)
+                
+                print("\nNew iteration:")
+                print(pos)
+                print(f"Current diff {p_theta_0 - new_point[-1]}")
+                if p_theta_0 - new_point[-1] > stop:
+                    break
+                points = torch.vstack((points, new_point))
+                iteration += 1
+    return points
+
+
+def obtain_combination_points(explorer: Callable,
+                                points: torch.tensor,
+                                step: float,
+                                theta_dim: int) -> torch.tensor:
+    """Performs the exploration of the posterior marginal of theta along the
+    combinations of the explored reparameterized thetas (which were explored
+    along the axis).
+
+    Args:
+        explorer (Callable): function that allows the reparameterized exporation
+            of the posterior marginal of theta.
+        points (torch.tensor): the points previously explored along the axis.
+        step (float): distance between the thetas along the axis fed to the 
+            explorer.
+        theta_dim (int): number of thetas used/that are going to be explored.
+
+    Returns:
+        torch.tensor: explored points corresponding to the combination of values
+            along the axis already explored. The structure is equal to the
+            structure of the argument `points`.
+    
+    Requires:
+        points should have the following structure:
+            -each row corresponds to a single point
+            -the first `theta_dim` columns should be the parameterized \\thetas
+            -the second `theta_dim`columns should be the \\thetas in the
+            original space
+            -the next `n_feat` columns should be the mode of the Gaussian
+            approximation for p_G(x | y, \\theta)
+            -the next `n_feat` columns should be the variance of the Gaussian
+            approximation for p_G(x | y, \\theta)
+            -the last column correspond to p(\\theta | y).
+    """
+
+    z = points[:, :theta_dim]
+    min_z = torch.min(z, 0)[0]
+    max_z = torch.max(z, 0)[0]
+    combinations = []
+    for start, end in zip(min_z, max_z):
+        point = torch.arange(start, end, step=step,  device=device, 
+                                dtype=torch.float64)
+        point = torch.round(point, decimals=2)
+        combinations.append(point)
+    
+    structured_results = []
+    for z in product(*combinations):
+        z = torch.hstack(z)
+        if torch.sum(z == 0) < theta_dim - 1:
+            print("\nCombined iteration")
+            print(z)
+            structured_results.append(explorer(z))
+    
+    return torch.vstack(structured_results)
+
+
+def explore_p_theta_given_y(neg_p_theta_given_y: Callable,
+                            functional_bound: Callable,
+                            init_guess: torch.tensor,
+                            step: float,
+                            stop: float) -> torch.tensor:
+    """Performs the complete exploration of the posterior marginal of theta.
+
+    Args:
+        neg_p_theta_given_y (Callable): function that calculates the negative
+            log posterior marginal of theta.
+        bounding_func (Callable): function that constraints the inputs fed to
+            the posterior marginal of theta that were given by the minimizer.
+        init_guess (torch.tensor): initial guess for the values of theta (the
+            parameters).
+        step (float): distance between the thetas fed to the explorer.
+        stop (float): threshold to stop the exploration of the thetas in the
+            current direction.
+
+    Returns:
+        torch.tensor: all explored points.
+    
+    Ensures:
+        points will have the following structure:
+            -each row corresponds to a single point
+            -the first `theta_dim` columns should be the parameterized \\thetas
+            -the second `theta_dim`columns should be the \\thetas in the
+            original space
+            -the next `n_feat` columns should be the mode of the Gaussian
+            approximation for p_G(x | y, \\theta)
+            -the next `n_feat` columns should be the variance of the Gaussian
+            approximation for p_G(x | y, \\theta)
+            -the last column correspond to p(\\theta | y).
+    """
+    
+    explorer = gen_f_theta_explorer(neg_p_theta_given_y, functional_bound,
+                                    init_guess)
+    theta_dim = init_guess.shape[-1]
+    axis_points = obtain_theta_axis_points(explorer, theta_dim, step, stop)
+    comb_points = obtain_combination_points(explorer, axis_points, step,
+                                            theta_dim)
+    return torch.vstack((axis_points, comb_points))
