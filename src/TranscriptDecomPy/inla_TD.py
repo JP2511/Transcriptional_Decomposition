@@ -508,3 +508,129 @@ def explore_p_theta_given_y(neg_p_theta_given_y: Callable,
     comb_points = obtain_combination_points(explorer, axis_points, step,
                                             theta_dim)
     return torch.vstack((axis_points, comb_points))
+
+
+###############################################################################
+# credible interval for x_i
+
+def create_p_xi_given_y(points: torch.tensor,
+                        theta_dim: int,
+                        n_feat: int,
+                        intercept: bool) -> tuple:
+    """Finds the MAP of x_i and a function that gives the marginal posterior of
+    each x_i.
+
+        This function makes the approximation that
+            p(x_i | y, \\theta) ~ N(ga_mode_i , (ga_Q^-1)_ii)
+            p(x_i | y) =\ int_theta p(x_i \cap \\theta | y) d\\theta
+                    = \int_theta p(x_i | y, \\theta) p(\\theta | y) d\\theta
+                    ~= \sum_k p(x_i | y, \\theta_k) p(\\theta_k | y) \delta_k
+        
+        In the calculation of the marginal : p(a) = \int_b p(a \cap b) db, it is
+    required that the b s used in the integral have their probability sum to 1.
+    However, in the previous approximation equation written 
+    \sum_k p(\\theta_k | y) != 1, because \\theta is a continuous variable. As
+    such, p(\\theta | y) were given new weights such that the sum of the
+    probabilities would equal one. So, the new probability of \\theta_k would be
+    p(\\theta_k | y) / (\sum_h p(\\theta_h | y)).
+
+        One additional problem that required consideration is the underflow
+    problem related to the sum of probabilities. Since we are working in log
+    space and the probabilities are super low, I had to use the log-sum-exp
+    trick to be able to calculate the new probabilities.
+
+    Args:
+        points (torch.tensor): points of the explored posterior marginal of
+            theta.
+        theta_dim (int): number of thetas that were used in the exploration.
+        n_feat (int): number of features of the model.
+        intercept (bool): indicates whether the model was defined with an
+            intercept or not.
+
+    Returns:
+        mode (torch.tensor): MAP estimate of the latent variable x.
+        p_xi_given_y (Callable): function that gives the marginal posterior
+            distribution of each x_i.
+    
+    Requires:
+        points should have the following structure:
+            -each row corresponds to a single point
+            -the first `theta_dim` columns should be the parameterized \\thetas
+            -the second `theta_dim`columns should be the \\thetas in the
+            original space
+            -the next `n_feat` columns should be the mode of the Gaussian
+            approximation for p_G(x | y, \\theta)
+            -the next `n_feat` columns should be the variance of the Gaussian
+            approximation for p_G(x | y, \\theta)
+            -the last column correspond to p(\\theta | y).
+    """
+    
+    p_theta_given_y = points[:, -1:]
+    max_p_theta = p_theta_given_y.max()
+    p_sum = torch.log(torch.exp(p_theta_given_y - max_p_theta).sum())
+    props = torch.exp(p_theta_given_y - max_p_theta - p_sum)
+
+    mean_var_sep = 2*theta_dim + 2*n_feat + intercept
+    means = points[:, 2*theta_dim : mean_var_sep]
+    vars = torch.sqrt(points[:, mean_var_sep : -1])
+
+    def p_xi_given_y(x: torch.tensor, h: torch.tensor, index: int or None=None):
+        if index is not None:
+            norm_dist = Normal(means[:, index:index+1], 
+                                vars[:, index:index+1])
+        else:
+            norm_dist = Normal(means, vars)
+
+        logprobs = props * (norm_dist.cdf(x+h) - norm_dist.cdf(x-h))
+        return logprobs.sum(0)
+    
+    return (points[0, 2*theta_dim : mean_var_sep], p_xi_given_y)
+
+
+def obtain_cred_int_x(points: torch.tensor, 
+                        theta_dim: int, 
+                        n_feat: int,
+                        intercept: bool,
+                        alpha: float) -> tuple:
+    """Calculates the symmetric credible interval around the MAP.
+
+    Args:
+        points (torch.tensor): points of the explored posterior marginal of
+            theta.
+        theta_dim (int): number of thetas that were used in the exploration.
+        n_feat (int): number of features of the model.
+        intercept (bool): indicates whether the model was defined with an
+            intercept or not.
+        alpha (float): significance level. The credible interval is going to be
+            of (1 - alpha)* 100 %.
+
+    Returns:
+        mode (torch.tensor): MAP estimate of the latent variable x.
+        result (torch.tensor): value such that (mode - result, mode + result)
+            forms the credible interval of the specified significance level.
+
+    Requires:
+        points should have the following structure:
+            -each row corresponds to a single point
+            -the first `theta_dim` columns should be the parameterized \\thetas
+            -the second `theta_dim`columns should be the \\thetas in the
+            original space
+            -the next `n_feat` columns should be the mode of the Gaussian
+            approximation for p_G(x | y, \\theta)
+            -the next `n_feat` columns should be the variance of the Gaussian
+            approximation for p_G(x | y, \\theta)
+            -the last column correspond to p(\\theta | y).
+    """
+    
+    mode, cdf = create_p_xi_given_y(points, theta_dim, n_feat, intercept)
+    
+    def f(h: torch.tensor) -> torch.tensor:
+        h = gen_tensor(h)
+        res = cdf(mode, h) - gen_tensor(1 - alpha)
+        return res.cpu().numpy()
+
+    result = np.array(root(f, x0=np.ones(mode.shape[-1]), method='lm').x)
+    return (mode, gen_tensor(result))
+
+
+##############################################################################
