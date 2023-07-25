@@ -9,69 +9,12 @@ from itertools import product
 from scipy.optimize import root
 from torch.distributions.normal import Normal
 
+import utils
+
 ###############################################################################
 # set up
 
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
 torch.autograd.set_detect_anomaly(True)
-
-###############################################################################
-# utils
-
-def general_determinant(A: torch.tensor, zero_dec: int) -> float:
-    """Calculates a general determinant that applies to singular matrices, i.e.,
-    matrices that are not of full-rank. The determinant here corresponds to the
-    product of all the nonzero eigenvalues of the matrix.
-
-        Here, we make use of the assumptions of A being a diagonal matrix, so
-    that we can use a banded solver as these are much faster than general sparse
-    solvers.
-
-    Args:
-        A (sparse.dia_matrix): real symmetric matrix.
-        zero (float): let e be an eigenvalue, if 0 <= e < zero, then e is
-            considered to be zero, otherwise e has its own value.
-
-
-    Returns:
-        log_det (float): logarithm of the general determinant of A.
-    
-    Requires:
-        A should only have nonzero values in the main diagonal and the first
-            offset diagonals of the matrix.
-        A.data should be ordered such that the main diagonal is the middle 
-            element of the array, and that the the top offset diagonal should be
-            the first element of the array.
-        zero >= 0
-        zero should be a very small number.
-    """
-
-    evs = torch.linalg.eigvalsh(A)
-    non_zero_evs = evs[torch.round(evs, decimals=zero_dec) != 0]
-    log_det = torch.sum(torch.log(non_zero_evs))
-
-    return log_det
-
-
-def gen_tensor(value: float or list, shape: int=None) -> torch.tensor:
-    """Creates a float64 tensor on the GPU.
-
-    Args:
-        value (float or list): value which we want to convert one instance or 
-            multiple instance of into a tensor.
-        shape (int, optional): in case the value is a single float that we would
-            like to repeat to form a 1-D vector, additionally to the value, the
-            length of the tensor should also be provided. Defaults to None.
-
-    Returns:
-        torch.tensor: tensor created.
-    """
-
-    if shape:
-        return torch.full((shape,), value, dtype=torch.float64, device=device)
-    return torch.tensor(value, dtype=torch.float64, device=device)
-
 
 ###############################################################################
 # GMRF pdf
@@ -94,7 +37,7 @@ def gmrf_density(x: torch.tensor, log_det: float, Q: torch.tensor) -> float:
     
     n = x.shape[0]
     exp_value = -(1/2) * (x[None, :] @ Q @ x[:, None])[0]
-    double_pi = gen_tensor(2*torch.pi)
+    double_pi = utils.gen_tensor(2*torch.pi)
     log_density = ( -n * torch.log(double_pi) + log_det ) / 2 + exp_value
     return log_density
 
@@ -110,7 +53,7 @@ def create_gmrf_density_func(Q: torch.tensor) -> Callable:
         Callable: function that calculates the density of the GMRF.
     """
     
-    log_det = general_determinant(Q, 5)
+    log_det = utils.general_determinant(Q, 5)
 
     return partial(gmrf_density, log_det=log_det, Q=Q)
 
@@ -174,11 +117,15 @@ def p_x_given_y_theta(data_likelihood: Callable,
         The Gaussian approximation is made by specifically matching the modal 
     configuration and the curvature at the mode.
         The calculations make use of the Cholesky decomposition. We assume that
-    the precision matrix is symmetric positive-definite and that even after 
-    summing diag(c) it maintains this property. Since this matrix is sparse,
-    the Cholesky decomposition will also be sparse, leading to speed-ups. The
-    Cholesky decomposition is faster than LU decomposition. The Cholesky 
-    decomposition is accelerated using the GPU.
+    the precision matrix is symmetric positive-definite after summing diag(c).
+        The minimizer can sometimes suggest values that cause overflows in the
+    likelihood function, specially if the link function in the likelihood
+    function contains an exponential. So, TEMPORARILY, a constraint function
+    is defined here to convert the R^n input that the minimizer provides to
+    the ]-300, 300[ domain of the likelihood function. Essentially, I am making
+    the assumption that the latent variable will always be within that interval.
+    I chose that interval, because it seems that safest values to avoid overflow
+    after exponentiation.
 
     Args:
         data_likelihood (Callable): log-likelihood function to use in the 
@@ -196,9 +143,17 @@ def p_x_given_y_theta(data_likelihood: Callable,
             a diagonal matrix with the second order derivatives of the 
             data_likelihood.
     """
-    
-    obj_f = lambda x: -data_likelihood(x) + 0.5 * (x[None] @ Q @ x[:, None])[0]
+    def box_constrain(x):
+        n = 600
+        return n*torch.sigmoid(x/125) - (n/2)
+
+    def obj_f(x):
+        constrained_x = box_constrain(x)
+        prior = 0.5 * (constrained_x[None] @ Q @ constrained_x[:, None])[0]
+        return -data_likelihood(constrained_x) + prior
+
     current_x = torchmin.minimize(obj_f, init_v, method='newton-cg').x
+    current_x = box_constrain(current_x)
 
     Hess = torch.autograd.functional.hessian(data_likelihood, current_x)
     c = -torch.diag(Hess)
@@ -207,10 +162,10 @@ def p_x_given_y_theta(data_likelihood: Callable,
 
     # constraining the values of x
     L = torch.linalg.cholesky(Q + torch.diag(c))
-    A = torch.hstack((gen_tensor(0), gen_tensor(1, n_feat), 
-                        gen_tensor(0, n_feat)))[None, :]
+    A = torch.hstack((utils.gen_tensor(0), utils.gen_tensor(1, n_feat), 
+                        utils.gen_tensor(0, n_feat)))[None, :]
     
-    current_x = constrain_NR(current_x, (-100, 100), L, A, gen_tensor(0))
+    current_x = constrain_NR(current_x, (-100, 100), L, A, utils.gen_tensor(0))
 
     return (current_x, L)
 
@@ -347,7 +302,7 @@ def gen_f_theta_explorer(neg_ln_p_theta_given_y: Callable,
         if torch.any(theta < 0):
             raise Exception("Failed becaused one of the thetas in the " +
                             "explorer has a negative value. Consider using a" +
-                            "smaller step")
+                            f"smaller step. Theta used: {theta}")
         
         ga_mode, ga_L, neg_p_theta = neg_ln_p_theta_given_y(theta)
         vars = torch.diag(torch.cholesky_inverse(ga_L))
@@ -387,7 +342,7 @@ def obtain_theta_axis_points(explorer: Callable,
             -the last column correspond to p(\\theta | y).
     """
     
-    init_z = gen_tensor(0, theta_dim)
+    init_z = utils.gen_tensor(0, theta_dim)
     theta_0_results = explorer(init_z)
     p_theta_0 = theta_0_results[-1]
     print(f"\n Initial probability is {p_theta_0}")
@@ -397,7 +352,7 @@ def obtain_theta_axis_points(explorer: Callable,
         for direction in (1, -1):
             iteration = 1
             while True:
-                pos = torch.eye(theta_dim, device=device, 
+                pos = torch.eye(theta_dim, device=utils.device, 
                                 dtype=torch.float64)[i] 
                 pos = step * iteration * pos * direction
                 new_point = explorer(pos)
@@ -451,7 +406,7 @@ def obtain_combination_points(explorer: Callable,
     max_z = torch.max(z, 0)[0]
     combinations = []
     for start, end in zip(min_z, max_z):
-        point = torch.arange(start, end, step=step,  device=device, 
+        point = torch.arange(start, end, step=step, device=utils.device, 
                                 dtype=torch.float64)
         point = torch.round(point, decimals=2)
         combinations.append(point)
@@ -625,12 +580,12 @@ def obtain_cred_int_x(points: torch.tensor,
     mode, cdf = create_p_xi_given_y(points, theta_dim, n_feat, intercept)
     
     def f(h: torch.tensor) -> torch.tensor:
-        h = gen_tensor(h)
-        res = cdf(mode, h) - gen_tensor(1 - alpha)
+        h = utils.gen_tensor(h)
+        res = cdf(mode, h) - utils.gen_tensor(1 - alpha)
         return res.cpu().numpy()
 
     result = np.array(root(f, x0=np.ones(mode.shape[-1]), method='lm').x)
-    return (mode, gen_tensor(result))
+    return (mode, utils.gen_tensor(result))
 
 
 ##############################################################################

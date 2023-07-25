@@ -1,7 +1,8 @@
-import inla_TD
+import utils
 
 import torch
 import numpy as np
+import dask.array as da
 
 from scipy import sparse
 from torch.distributions.normal import Normal
@@ -47,14 +48,14 @@ def subsetting_latent_var(x: torch.tensor) -> torch.tensor:
     """
 
     n_feat = (x.shape[-1] -1) // 2
-    return x[:, :, -n_feat:] if len(x.shape) > 1 else x[-n_feat:]
+    return x[-n_feat:]
 
 
 ####################################
 #  Negative Binomial distribution  #
 ####################################
 
-def log_likelihood_neg_binom(x: torch.tensor, obs: torch.tensor,
+def log_likelihood_neg_binom(x: torch.tensor, obs: da.array,
                                 link_f: Callable,
                                 theta_y: torch.tensor) -> torch.tensor:
     """Calculates the log-likelihood of the observations assuming that these
@@ -64,7 +65,7 @@ def log_likelihood_neg_binom(x: torch.tensor, obs: torch.tensor,
     Args:
         x (torch.tensor): subset of the latent variable that generates the 
             observations.
-        obs (torch.tensor): observations made.
+        obs (da.array): observations made.
         link_f (Callable): function that converts the latent variable into the
             mean of the Negative Binomial distribution.
         theta_y (torch.tensor): dispersion parameter of the Negative Binomial
@@ -79,10 +80,15 @@ def log_likelihood_neg_binom(x: torch.tensor, obs: torch.tensor,
         link_f must produce only positive output values
         0 <= theta_y <= 1
     """
+    n = link_f(x) * theta_y / (1 - theta_y)
+
+    def log_pdf(y):
+        log_probs = NegativeBinomial(n, 1 - theta_y).log_prob(y.a)
+        return utils.DaskTensor(log_probs)
     
-    n = link_f(x) * (theta_y/ (1 - theta_y))
-    nb_dist = NegativeBinomial(n, 1 - theta_y)
-    return log_likelihood(nb_dist, obs)
+    likelihood = da.map_blocks(log_pdf, obs, dtype=np.float64).sum()
+    return likelihood.compute().a
+
 
 
 def sample_NegBinom_obs(eta: torch.tensor, link_f: Callable,
@@ -232,11 +238,13 @@ def sample_Gaus_obs(eta: torch.tensor, link_f: Callable, theta_y: float,
 #  Generating precision matrices  #
 ###################################
 
-def creating_RW1_Q(n_feat: int) -> torch.tensor:
+def creating_RW1_Q(theta_PD: torch.tensor, n_feat: int) -> torch.tensor:
     """Generates the precision matrix of a first-order Random-Walk. This 
     corresponds to an intrinsic GMRF.
 
     Args:
+        theta_PD (torch.tensor): parameter that controls the precision of the
+            Random Walk.
         n_feat (int): number of features of the Random-Walk. Side of tWhe 
             precision matrix.
 
@@ -247,12 +255,13 @@ def creating_RW1_Q(n_feat: int) -> torch.tensor:
         n_feat > 0
     """
     
-    diagonal = np.hstack(([1], np.full(n_feat -2, 2), [1]))
-    Q = sparse.diags(diagonal)
-    Q.setdiag(-1, k=1)
-    Q.setdiag(-1, k=-1)
+    theta_PD = theta_PD[None]
+    main_diag = torch.hstack((theta_PD, (2*theta_PD).repeat((n_feat-2,)),
+                                theta_PD))
+    off_diag = theta_PD.repeat(n_feat-1)
 
-    return inla_TD.gen_tensor(Q.todense())
+    RW1 = torch.diag(main_diag) - torch.diag(off_diag, diagonal=-1)
+    return RW1 - torch.diag(off_diag, diagonal=1)
 
 
 def build_gmrf_Q(n_feat: int, theta_intercept: torch.tensor, 
@@ -287,7 +296,7 @@ def build_gmrf_Q(n_feat: int, theta_intercept: torch.tensor,
     theta_PI_1_T = theta_PI[None].repeat((n_feat,))
     theta_PI_1 = theta_PI_1_T[:, None]
 
-    Q_PD = theta_PD * creating_RW1_Q(n_feat)
+    Q_PD = creating_RW1_Q(theta_PD, n_feat)
     Q_PI = torch.diag(theta_PI_1_T)
 
     fst_row = torch.hstack(( Q_11      ,  theta_PI_1_T, -theta_PI_1_T))
@@ -321,7 +330,7 @@ def sample_intercept(theta_intercept: torch.tensor,
         n_samples > 0
     """
 
-    return sample_Gaus_obs(inla_TD.gen_tensor(0), lambda x: x, 
+    return sample_Gaus_obs(utils.gen_tensor(0), lambda x: x, 
                             1/theta_intercept, n_samples)[:, None]
 
 
@@ -345,7 +354,7 @@ def sample_random_effects(n_feat: int, theta_PI: torch.tensor,
         n_samples > 0
     """
     
-    mean = inla_TD.gen_tensor(0, n_feat)
+    mean = utils.gen_tensor(0, n_feat)
     Q = torch.diag(theta_PI.repeat(n_feat,))
     
     return MultivariateNormal(mean, precision_matrix=Q).rsample((n_samples,)) 
@@ -392,8 +401,7 @@ def constraining_x(eigVal: torch.tensor, eigVec: torch.tensor, x: torch.tensor,
     return new_x
 
 
-def sample_IGMRF(Q: torch.tensor, theta_PD: torch.tensor,
-                    n_samples: int) -> torch.tensor:
+def sample_IGMRF(Q: torch.tensor, n_samples: int) -> torch.tensor:
     """Samples from the intrinsic GMRF. 
     
         Given that an intrinsic GMRF is characterized by a rank deficient
@@ -404,8 +412,6 @@ def sample_IGMRF(Q: torch.tensor, theta_PD: torch.tensor,
     Args:
         Q (torch.tensor): graph relationships of the IGMRF in the form of a 
             matrix.
-        theta_PD (torch.tensor): constant multiplied to Q to form the precision
-            matrix. 
         n_samples (int): number of samples to be generated of the IGMRF.
 
     Returns:
@@ -415,14 +421,14 @@ def sample_IGMRF(Q: torch.tensor, theta_PD: torch.tensor,
     eigVal, eigVec = torch.linalg.eigh(Q)
     eigVal, eigVec = eigVal[1:], eigVec[:, 1:]
 
-    cov = torch.diag(1/(eigVal * theta_PD))
-    mean = inla_TD.gen_tensor(0, eigVal.shape[0])
+    cov = torch.diag(1/eigVal)
+    mean = utils.gen_tensor(0, eigVal.shape[0])
     
     y = MultivariateNormal(mean, cov).sample((n_samples,)).T
     x = (eigVec @ y)
 
-    A = inla_TD.gen_tensor(1, Q.shape[0])[None, :]
-    e = inla_TD.gen_tensor([[0]])
+    A = utils.gen_tensor(1, Q.shape[0])[None, :]
+    e = utils.gen_tensor([[0]])
 
     return constraining_x(eigVal, eigVec, x, A, e).T
 
@@ -465,7 +471,7 @@ def sampling_global_gmrf(n_feat: int, theta_intercept: torch.tensor,
     
     intercept = sample_intercept(theta_intercept, n_samples)
 
-    Q_PD = creating_RW1_Q(n_feat)
+    Q_PD = creating_RW1_Q(theta_PD, n_feat)
     PD = sample_IGMRF(Q_PD, theta_PD, n_samples)
 
     PI = sample_random_effects(n_feat, theta_PI, n_samples)
